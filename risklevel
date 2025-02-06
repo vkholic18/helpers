@@ -1,0 +1,24 @@
+for info in file_info:
+    file_date = datetime.strptime(info["file_date"], "%Y-%m-%d")  # Adjust format if needed
+    deposit = info.get("deposit", {})
+    escrow_amount = deposit.get(currency, 0)
+    
+    # Calculate days difference
+    days_diff = (datetime.today() - file_date).days
+
+    # Determine risk level
+    if days_diff > 4:
+        risk_level = "High"
+    elif days_diff > 3:
+        risk_level = "Medium"
+    elif days_diff > 2:
+        risk_level = "Low"
+    else:
+        risk_level = "None"
+
+    if escrow_amount != 0:
+        response.append({
+            "amount": escrow_amount,
+            "fileDate": file_date.strftime("%Y-%m-%d"),
+            "riskLevel": risk_level
+        })
