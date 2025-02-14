@@ -67,20 +67,68 @@ if __name__ == "__main__":
 
 
 
-transactions_data = data.get("data", {}).get("attributes", {}).get("transactionHistoryDetails", [])
+total_amount_paid_in = 0
+total_amount_paid_out = 0
 
-for account in transactions_data:
-    for transaction in account.get("transactions", []):
-        # Process each transaction
-        value_date = transaction.get("valueDateTime")
-        credit_debit = transaction.get("creditDebitIndicator")
-        transaction_info = transaction.get("transactionInformation", "")
-        amount = transaction.get("amount", {}).get("amount", 0)
+# Extract transactions
+transaction_data = transactions["data"]["attributes"]["transactionHistoryDetails"][0]["transactions"]
 
-        # Apply filtering conditions
-        if from_date <= value_date <= to_date and account_number == account.get("accountId"):
-            if credit_debit == "Credit" and "Claim" in transaction_info:
-                total_amount_paid_in += amount
-            elif credit_debit == "Debit" and transaction_info.startswith("BX"):
-                total_amount_paid_out += amount
+# Process transactions
+for transaction in transaction_data:
+    amount = transaction["amount"]["amount"]
+    credit_debit = transaction["creditDebitIndicator"]
+    transaction_info = transaction["transactionInformation"]
+
+    if credit_debit == "Credit" and "Claim" in transaction_info:
+        total_amount_paid_in += amount
+    elif credit_debit == "Debit" and transaction_info.startswith("BX"):
+        total_amount_paid_out += amount
+
+# Business rule checks
+if total_amount_paid_in = 0
+total_amount_paid_out = 0
+
+# Extract transactions
+transactions = sample_data["data"]["attributes"]["transactionHistoryDetails"][0]["transactions"]
+
+# Process transactions
+for transaction in transactions:
+    amount = transaction["amount"]["amount"]
+    credit_debit = transaction["creditDebitIndicator"]
+    transaction_info = transaction["transactionInformation"]
+
+    if credit_debit == "Credit" and "Claim" in transaction_info:
+        total_amount_paid_in += amount
+    elif credit_debit == "Debit" and transaction_info.startswith("BX"):
+        total_amount_paid_out += amount
+
+# Business rule checks
+if total_amount_paid_in > 0 and total_amount_paid_out == 0:
+    total_amount_paid_out = 0
+elif total_amount_paid_out > 0 and total_amount_paid_in == 0:
+    total_amount_paid_in = 0 > 0 and total_amount_paid_out == 0:
+    total_amount_paid_out = 0
+elif total_amount_paid_out > 0 and total_amount_paid_in == 0:
+    total_amount_paid_in = 0
+
+return {
+    "total_amount_paid_out":total_amount_paid_out
+    "total_amount_paid_out":total_amount_paid_out
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
