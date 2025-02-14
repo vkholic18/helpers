@@ -52,3 +52,35 @@ def get_transactions():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+transactions_data = data.get("data", {}).get("attributes", {}).get("transactionHistoryDetails", [])
+
+for account in transactions_data:
+    for transaction in account.get("transactions", []):
+        # Process each transaction
+        value_date = transaction.get("valueDateTime")
+        credit_debit = transaction.get("creditDebitIndicator")
+        transaction_info = transaction.get("transactionInformation", "")
+        amount = transaction.get("amount", {}).get("amount", 0)
+
+        # Apply filtering conditions
+        if from_date <= value_date <= to_date and account_number == account.get("accountId"):
+            if credit_debit == "Credit" and "Claim" in transaction_info:
+                total_amount_paid_in += amount
+            elif credit_debit == "Debit" and transaction_info.startswith("BX"):
+                total_amount_paid_out += amount
+
