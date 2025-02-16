@@ -1,0 +1,94 @@
+1. Difference between Pandas Dataframe and Spark Dataframe.
+
+2.Narrow Transformations
+Each partition depends on only one partition from the previous stage.
+Example: filter(), map(), where().
+Efficient because Spark processes partitions independently.
+
+Wide Transformations
+Require data shuffling between partitions.
+Example: groupBy(), join(), orderBy().
+More expensive due to network communication.
+
+3.Optimizing Spark jobs means minimizing shuffles whenever possible!
+
+4.flightData2015 = spark \
+    .read \
+    .option("inferSchema", "true") \
+    .option("header", "true") \
+    .csv("/data/flight-data/csv/2015-summary.csv")
+
+5.You write the query – This could be in SQL, DataFrame, or Dataset format.
+Spark checks the query – If the query is valid, Spark converts it into a Logical Plan (a blueprint of what needs to be done).
+Optimization happens – Spark optimizes the Logical Plan to make it more efficient and converts it into a Physical Plan (how to execute the query).
+Execution on the cluster – Spark runs the Physical Plan by breaking it into RDD operations and distributing the work across the cluster.
+
+6.What Happens in Physical Planning?
+Generate Multiple Physical Execution Strategies
+
+Spark creates multiple ways to execute the optimized Logical Plan.
+Example: If your query involves a JOIN, Spark might consider Broadcast Join, Sort-Merge Join, or Shuffle Hash Join.
+Cost-Based Optimization (CBO) → Choose the Best Strategy
+
+Spark estimates the cost (time, memory, and computation) of each execution strategy.
+It chooses the most efficient one based on cluster resources and data size.
+Example:
+If one table is small, Spark may broadcast it to all nodes (Broadcast Join).
+If tables are large, it may sort and merge them (Sort-Merge Join).
+Create a Spark Execution Plan (Physical Plan)
+
+The selected strategy is converted into an execution plan with specific tasks for executors.
+At this stage, the Physical Plan is ready for execution on the cluster! 
+
+7.code -> logical plan -> physical plan -> rdds-> return user
+
+8.from pyspark.sql.functions import skewness, kurtosis
+
+df.select(skewness("column_name"), kurtosis("column_name")).show()
+
+9.Available Read Modes (Table 9-1)
+Read Mode	Description
+permissive (default)	Sets corrupted fields to null and stores bad records in _corrupt_record.
+dropMalformed	Drops rows containing malformed records.
+failFast	Stops reading immediately upon finding a malformed record.
+
+
+10.Which Mode Should You Use?
+✅ Cluster Mode: For large-scale, production applications.
+✅ Client Mode: For interactive development and real-time monitoring.
+✅ Local Mode: For local testing and debugging small datasets.
+
+
+
+
+12.1️⃣ Spark Session is Created
+When you run spark-submit, a Spark session is created. This session acts as the entry point for Spark applications. The cluster manager (YARN, Mesos, or Kubernetes) allocates a driver to manage the execution.
+
+2️⃣ Driver Requests Resources
+The driver requests resources (executors) from the cluster manager. The cluster manager then assigns worker nodes to run the executors based on the resources requested.
+
+3️⃣ Driver Distributes Tasks
+The driver splits the job into smaller tasks and distributes them across the executors for parallel execution.
+
+4️⃣ Executors Perform Computation
+Each executor runs its assigned tasks, such as reading data, performing transformations, and computations. They return partial results to the driver.
+
+5️⃣ Driver Computes Final Results
+The driver collects and aggregates the partial results from the executors. It then writes the final output, which could be stored in a database, written to disk, or returned to the user.
+
+6️⃣ Spark Application Shuts Down
+Once the execution is complete, the cluster manager shuts down the executors, releases the resources, and the application exits.
+
+13.In Spark, stages represent groups of tasks that can be executed together on different machines. These tasks typically perform the same operation but on different partitions of data. Spark tries to optimize execution by packing as many transformations as possible into a single stage, but certain operations, like shuffling, force Spark to start new stages.
+
+14.How to Enable?
+Set the following in Spark configurations:
+spark.dynamicAllocation.enabled = true
+
+Additional Tuning Parameters:
+
+Minimum Executors: spark.dynamicAllocation.minExecutors
+Maximum Executors: spark.dynamicAllocation.maxExecutors
+Idle Timeout: spark.dynamicAllocation.executorIdleTimeout
+Initial Executors: spark.dynamicAllocation.initialExecutors
+
