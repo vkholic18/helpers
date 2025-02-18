@@ -60,75 +60,28 @@ if __name__ == "__main__":
 
 
 
-
-
-
-
-
-
+import datetime
 
 total_amount_paid_in = 0
 total_amount_paid_out = 0
 
-# Extract transactions
-transaction_data = transactions["data"]["attributes"]["transactionHistoryDetails"][0]["transactions"]
+from_date = datetime.datetime.strptime(from_date_str, "%Y-%m-%d")
+to_date = from_date + datetime.timedelta(days=7)
 
-# Process transactions
+transaction_data = transactions.get("data", {}).get("attributes", {}).get("transactionHistoryDetails", [{}])[0].get("transactions", [])
+
 for transaction in transaction_data:
-    amount = transaction["amount"]["amount"]
-    credit_debit = transaction["creditDebitIndicator"]
-    transaction_info = transaction["transactionInformation"]
+    trans_date = datetime.datetime.strptime(transaction["valueDateTime"], "%Y-%m-%dT%H:%M:%SZ")
 
-    if credit_debit == "Credit" and "Claim" in transaction_info:
-        total_amount_paid_in += amount
-    elif credit_debit == "Debit" and transaction_info.startswith("BX"):
-        total_amount_paid_out += amount
+    if from_date <= trans_date <= to_date and transaction["accountId"] == account_number:
+        amount = transaction["amount"]["amount"]
+        credit_debit = transaction["creditDebitIndicator"]
+        transaction_info = transaction.get("transactionInformation", "")
 
-# Business rule checks
-if total_amount_paid_in = 0
-total_amount_paid_out = 0
+        if credit_debit == "Credit" and "Claim" in transaction_info:
+            total_amount_paid_in += amount
+        elif credit_debit == "Debit" and transaction_info.startswith("BX"):
+            total_amount_paid_out += amount
 
-# Extract transactions
-transactions = sample_data["data"]["attributes"]["transactionHistoryDetails"][0]["transactions"]
-
-# Process transactions
-for transaction in transactions:
-    amount = transaction["amount"]["amount"]
-    credit_debit = transaction["creditDebitIndicator"]
-    transaction_info = transaction["transactionInformation"]
-
-    if credit_debit == "Credit" and "Claim" in transaction_info:
-        total_amount_paid_in += amount
-    elif credit_debit == "Debit" and transaction_info.startswith("BX"):
-        total_amount_paid_out += amount
-
-# Business rule checks
-if total_amount_paid_in > 0 and total_amount_paid_out == 0:
-    total_amount_paid_out = 0
-elif total_amount_paid_out > 0 and total_amount_paid_in == 0:
-    total_amount_paid_in = 0 > 0 and total_amount_paid_out == 0:
-    total_amount_paid_out = 0
-elif total_amount_paid_out > 0 and total_amount_paid_in == 0:
-    total_amount_paid_in = 0
-
-return {
-    "total_amount_paid_out":total_amount_paid_out
-    "total_amount_paid_out":total_amount_paid_out
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+print("Total Amount Paid In:", total_amount_paid_in)
+print("Total Amount Paid Out:", total_amount_paid_out)
