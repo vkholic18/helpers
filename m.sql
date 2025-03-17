@@ -92,35 +92,34 @@ WHERE classificationId = '3523'
 =============================================================================
 
 
-CREATE TEMP TABLE bcp_db_host_join AS 
+CREATE TEMPORARY TABLE bcp_db_host_join AS 
 SELECT 
-    d."deploymentId",
-    d."Id",
-    d."Name",
-    d."build",
-    d."subName",
-    d."familyId",
-    d."familyName",
-    d."applicationId",
-    d."applicationName",
-    d."checkBcpTier",
-    d."cto",
-    d."RecoveryTimeObjective",
-    d."createdOn",
-    d."rchTestDate",
-    CASE WHEN db."db_deploymentId" IS NOT NULL THEN 'Yes' ELSE 'No' END AS isDB,
-    CASE WHEN h."host_deployment_id" IS NOT NULL THEN 'Yes' ELSE 'No' END AS isHost,
-    CASE WHEN a."assetId_pub" IS NOT NULL THEN 'Yes' ELSE 'No' END AS isPublicCloud,
-    d."rc",
-    CASE WHEN ai."assetId_swap" IS NOT NULL THEN 'Yes' ELSE 'No' END AS IBS_Integral,
-    d."assetId_sdp"
+    d.deploymentId,
+    b.BuildId,
+    b.BuildName,
+    b.SubBuildId,
+    b.SubBuildName,
+    f.familyId,
+    f.familyName,
+    a.ApplicationId,
+    a.ApplicationName,
+    t.techBcpTier,
+    r.RecoveryTimeObjective,
+    h.createdOn,
+    h.eachTestDate,
+    CASE WHEN db.deploymentId IS NOT NULL THEN TRUE ELSE FALSE END AS isDB,
+    CASE WHEN h.host_deployment_id IS NOT NULL THEN TRUE ELSE FALSE END AS isHost,
+    CASE WHEN c.assetId_pub IS NOT NULL THEN TRUE ELSE FALSE END AS isPublicCloud,
+    CASE WHEN s.assetId_sdp IS NOT NULL THEN 'Yes' ELSE 'No' END AS CFTC,
+    CASE WHEN i.assetId_ibs IS NOT NULL THEN 'Yes' ELSE 'No' END AS IBS_Integral,
+    s.assetId_sdp
 FROM depl_classification_bcp d
-LEFT JOIN databases db ON d."deploymentId" = db."db_deploymentId"
-LEFT JOIN host_df h ON d."deploymentId" = h."host_deployment_id"
-LEFT JOIN classification_public c ON d."deploymentId" = c."assetId_pub"
-LEFT JOIN assets_for_cft a ON d."deploymentId" = a."assetId_swap"
-LEFT JOIN integral i ON d."deploymentId" = i."assetId_ibs"
-LEFT JOIN stateful_data_platform sdp ON d."deploymentId" = sdp."assetId_sdp";
+LEFT JOIN host_df h ON d.deploymentId = h.host_deployment_id
+LEFT JOIN classification_public_cloud c ON d.deploymentId = c.assetId_pub
+LEFT JOIN assets_for_tco a ON d.deploymentId = a.assetId_swap
+LEFT JOIN assets_for_ibs_integral i ON d.deploymentId = i.deploymentId
+LEFT JOIN stateful_data_platform s ON d.deploymentId = s.assetId_sdp;
+
 
 
 ============================================================
