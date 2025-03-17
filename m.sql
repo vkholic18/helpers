@@ -83,5 +83,10 @@ SELECT DISTINCT assetId AS assetId_ibs
 FROM classification_df
 WHERE ClassificationId = '2962';
 
+CREATE TABLE stateful_data_platform AS 
+SELECT DISTINCT assetId AS assetId_sdp 
+FROM classification_df 
+WHERE classificationId = '3523'
+
 
 =============================================================================
