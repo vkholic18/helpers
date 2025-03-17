@@ -46,3 +46,42 @@ FROM deployments_filtered d
 LEFT JOIN classification_bcp c
 ON d.deploymentId = c.assetId;
 
+
+============================================================
+
+
+
+-- Create temporary table for databases
+CREATE TEMPORARY TABLE databases AS 
+SELECT DISTINCT deploymentId AS db_deploymentId
+FROM SP_Databases
+WHERE ownershipType = 'DependencyOnly'
+AND entityTypeName LIKE '%MONGODB%';
+
+-- Create temporary table for host_df
+CREATE TEMPORARY TABLE host_df AS 
+SELECT DISTINCT deploymentId AS host_deployment_id
+FROM SP_Host
+WHERE ownership = 'DependencyOnly'
+AND type = 'Database';
+
+-- Create temporary table for classification_public_cloud
+CREATE TEMPORARY TABLE classification_public_cloud AS 
+SELECT DISTINCT assetId AS assetId_pub
+FROM classification_df
+WHERE appdirType = 'PubCloud' AND appdirValue = 'Yes';
+
+-- Create temporary table for assets_for_ctfc
+CREATE TEMPORARY TABLE assets_for_ctfc AS 
+SELECT DISTINCT assetId AS assetId_swap
+FROM classification_df
+WHERE ClassificationName = 'Swap Dealer application';
+
+-- Create temporary table for assets_for_ibs_integral
+CREATE TEMPORARY TABLE assets_for_ibs_integral AS 
+SELECT DISTINCT assetId AS assetId_ibs
+FROM classification_df
+WHERE ClassificationId = '2962';
+
+
+=============================================================================
