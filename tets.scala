@@ -1,8 +1,10 @@
 val getTopLevelParent = catalog_relationship
-  .select(col("first_resource_id").alias("destination"), lit(null).alias("source"), col("first_resource_id").alias("root"))
-  .except(
-    catalog_relationship.select(col("second_resource_id"))
+  .select(
+    col("first_resource_id").alias("destination"),
+    lit(null).cast("string").alias("source"),  // Ensure source has same data type
+    col("first_resource_id").alias("root")
   )
+  .join(secondResourceIds, col("destination") === col("second_resource_id"), "left_anti") 
 
 // Step 2: Recursive-like join to establish hierarchy
 val secondResourceDF = catalog_relationship.alias("al")
