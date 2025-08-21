@@ -14,9 +14,7 @@ def release_ips_command() -> Callable[..., None]:
     return create_release_ips_command_with()
 
 def create_release_ips_command_with(
-    reservation_service: ReservationService,
 ) -> Callable[..., None]:
-    """Return a function to release ips for the user."""
     
     def command(
         file: Annotated[
@@ -24,41 +22,12 @@ def create_release_ips_command_with(
             typer.Option("--file", "-f", help="JSON file containing host information to release"),
         ],
     ) -> None:
-        """
-        Release hosts provided in a JSON input file.
-
-        Examples:\n
-        Release hosts provided in the JSON input file:\n
-            vmca ips release -f hosts_file.json \n
-            
-            Example JSON format for single host:
-            {
-                "ip": "172.19.1.18",
-                "hostname": "hostname5.domain5",
-                "serial_number": "072728a0-223jwd-dwdthw"
-            }
-            
-            Example JSON format for multiple hosts:
-            [
-                {
-                    "ip": "172.19.1.18",
-                    "hostname": "hostname5.domain5",
-                    "serial_number": "072728a0-223jwd-dwdthw"
-                },
-                {
-                    "ip": "172.19.1.19",
-                    "hostname": "hostname6.domain5",
-                    "serial_number": "072728a0-223jwd-dwdthx"
-                }
-            ]
-        """
         
         hosts_list = []
         try:
             file_content = file.read()
             hosts_data = json.loads(file_content)
             
-            # Handle both single host object and array of hosts
             if isinstance(hosts_data, dict):
                 hosts_data = [hosts_data]
             elif not isinstance(hosts_data, list):
@@ -70,17 +39,11 @@ def create_release_ips_command_with(
                     print("Invalid JSON format: Each entry must be an object")
                     raise typer.Exit(1)
                 
-                # Validate required fields
                 required_fields = ["ip", "hostname", "serial_number"]
                 missing_fields = [field for field in required_fields if field not in host]
                 
                 if missing_fields:
                     print(f"Missing required fields in host entry: {missing_fields}")
-                    raise typer.Exit(1)
-                
-                # Validate IP address format
-                if not is_valid_ip(host["ip"]):
-                    print(f"Invalid IP address format: {host['ip']}")
                     raise typer.Exit(1)
                 
                 hosts_list.append({
@@ -100,19 +63,11 @@ def create_release_ips_command_with(
             print("No valid host entries to be released")
             raise typer.Exit(1)
 
-        if len(hosts_list) > 100:
-            print(
-                "Release Limit Exceeded: You attempted to release more than 100 hosts. Please reduce the number and try again."
-            )
-            raise typer.Exit(1)
-
-        # Release hosts using the new API
         release_hosts_via_api(hosts_list)
 
     return command
 
 def release_hosts_via_api(hosts_list: list[dict]) -> None:
-    """Release hosts using the VMCA deregister API."""
     
     print(f"Releasing {len(hosts_list)} host(s)...")
     
@@ -143,7 +98,6 @@ def release_hosts_via_api(hosts_list: list[dict]) -> None:
     status_code = response.status_code
     
     if status_code == 200:
-        # Parse the success response
         status = response_body.get("body", {}).get("status")
         message = response_body.get("body", {}).get("message", "No response message provided")
         
@@ -153,16 +107,6 @@ def release_hosts_via_api(hosts_list: list[dict]) -> None:
             print(f"[ERROR]: {message}")
             raise typer.Exit(1)
     else:
-        # Handle error responses
         error_message = response_body.get("message", "Unknown error occurred")
         print(f"[ERROR {status_code}]: {error_message}")
         raise typer.Exit(1)
-
-def is_valid_ip(ip: str) -> bool:
-    """Validate IP address format."""
-    import ipaddress
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
