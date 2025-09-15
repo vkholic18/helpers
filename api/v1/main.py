@@ -10,9 +10,10 @@ elif path == "/tgw_connection":
         return error_response
 
     vpc_crn = request_data.get("vpc_crn")
-    if not vpc_crn:
-        return {"body": "Missing vpc_crn", "statusCode": 400}
+    transit_gateway_id = args.get("transit_gateway_id")
+    if not vpc_crn or not transit_gateway_id:
+        return {"body": "Missing vpc_crn or transit_gateway_id", "statusCode": 400}
 
-    return create_tgw_connection(vpc_crn)
+    return create_tgw_connection(vpc_crn,transit_gateway_id)
 
 
