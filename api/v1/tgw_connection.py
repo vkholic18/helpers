@@ -5,8 +5,8 @@ from datetime import datetime
 IAM_URL = "https://iam.cloud.ibm.com/identity/token"
 TGW_API = "https://transit.cloud.ibm.com/v1"
 
-API_KEY_ACCOUNT_1 = os.getenv("API_KEY_1368749")
-API_KEY_ACCOUNT_2 = os.getenv("API_KEY_2579380")
+VMCA_DEV_API_KEY = os.getenv("VMCA_DEV_API_KEY")
+VMCA_VPC_API_KEY = os.getenv("VMCA_VPC_API_KEY")
 
 def get_iam_token(api_key: str) -> str:
     """Get IAM token from IBM Cloud"""
@@ -30,54 +30,17 @@ def generate_name():
 def approve_connection(connection_id: str, transit_gateway_id: str) -> dict:
     """Approve a TGW connection using Account 2"""
     try:
-        iam_token = get_iam_token(API_KEY_ACCOUNT_2)
-    except Exception as e:
-        return {
-            "body": {"message": f"Failed to get IAM token for approval: {str(e)}"},
-            "statusCode": 500,
-        }
-
-    url = (
-        f"{TGW_API}/transit_gateways/{transit_gateway_id}/connections/"
+        iam_token = get_iam_token(VMCA_VPC_API_KEY)
+transit_gateway_id}/connections/"
         f"{connection_id}/actions?version=2021-05-01"
-    )
-    headers = {
-        "Authorization": f"Bearer {iam_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {"action": "approve"}
-
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-    except Exception as e:
-        return {
-            "body": {"message": f"Approval request failed: {str(e)}"},
-            "statusCode": 500,
-        }
-
-    if resp.status_code == 204:
-        return {"body": {"message": "Connection approved"}, "statusCode": 200}
-    elif resp.status_code == 403:
-        return {"body": {"message": "Not authorized to approve connection"}, "statusCode": 206}
-    elif resp.status_code == 404:
-        return {"body": {"message": "Connection or TGW not found"}, "statusCode": 206}
-    elif resp.status_code == 409:
-        return {"body": {"message": "Cannot approve classic_access VPC connection"}, "statusCode": 206}
-    else:
-        return {"body": {"message": resp.text}, "statusCode": 206}
-
-
-def create_and_approve_connection(vpc_crn: str, transit_gateway_id: str) -> dict:
-    """Create TGW connection and attempt approval"""
-    payload = {
-        "network_type": "vpc",
-        "name": generate_name(),         # Using vpc_crn as name
-        "network_id": vpc_crn,   # Using vpc_crn as network_id
+vpc_crn: str, transit_gateway_id: str) -> dict:
+        "network_id": vpc_crn,
     }
 
     # Step 1: Create connection using Account 1
     try:
-        iam_token = get_iam_token(API_KEY_ACCOUNT_1)
+        iam_token = get_iam_token(VMCA_DEV_API_KEY)
+
     except Exception as e:
         return {
             "body": {"message": f"Failed to get IAM token for creation: {str(e)}"},
