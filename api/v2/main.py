@@ -151,6 +151,13 @@ def main(args):
             else:
                 response = delete_tgw_connection(vpc_crn)
             return response
+        elif path == "/reconciliation":
+            if method.lower() != "get":
+                return {"body": "Method not allowed", "statusCode": 405}
+        
+            response = list_all_hosts_for_reconciliation(db_session)
+            return response
+
         else:
             return {"body": "Operation not allowed", "path": path, "statusCode": 400}
     except Exception as e:
