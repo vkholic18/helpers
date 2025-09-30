@@ -2,7 +2,7 @@
 
 from sqlalchemy.orm import Session
 from typing import Dict
-from models import Host  # Update the import path as needed
+from common.db import Host
 
 
 def list_all_hosts_for_reconciliation(db_session: Session) -> Dict:
