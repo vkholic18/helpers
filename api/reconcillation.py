@@ -105,7 +105,8 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     file_name_today = f'{datetime.datetime.now().strftime("%m-%d-%y")}_VM_Inventory.csv'
     
     # Determine which folders to check
-    folders_to_check = BOX_FOLDERS
+    # BOX_FOLDER_TOKST To be implemented 
+    folders_to_check = [ BOX_FOLDER_DALST ]
     
     vm_inventory = []
     file_content = None
@@ -118,7 +119,7 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     client = BoxClient(auth)
     
     # Try to find the file in Box folders
-    for location, folder_id in folders_to_check.items():
+    for folder_id in folders_to_check.items():
         try:
             print(f'[INFO] Checking files in {location} folder')
             file_names = list_files_in_folder(folder_id, client)
@@ -141,8 +142,8 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
             file_content = download_file_from_box(
                 target_file,
                 folder_id,
-                CLIENT_ID,
-                CLIENT_SECRET,
+                BOX_CLIENT_ID,
+                BOX_CLIENT_SECRET,
                 ENTERPRISE_ID
             )
             found_location = location
