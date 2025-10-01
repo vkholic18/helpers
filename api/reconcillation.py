@@ -111,7 +111,6 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     vm_inventory = []
     file_content = None
     target_file = None
-    found_location = None
     
     # Authenticate once for all operations
     print("[INFO] Authenticating BOX user")
@@ -119,11 +118,9 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     client = BoxClient(auth)
     
     # Try to find the file in Box folders
-    for folder_id in folders_to_check.items():
+    for folder_id in folders_to_check:
         try:
-            print(f'[INFO] Checking files in {location} folder')
             file_names = list_files_in_folder(folder_id, client)
-            print(f'[DEBUG] Files in {location}: {file_names}')
             
             # Prefer today's file, else fallback to latest
             if file_name_today in file_names:
@@ -135,10 +132,9 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
                     print(f"[WARN] Today's file not found, falling back to latest available: {target_file}")
             
             if not target_file:
-                print(f'[INFO] No inventory file found in {location}, trying next folder')
+                print(f'[INFO] No inventory file found trying next folder')
                 continue
-            
-            print(f'[INFO] Downloading {target_file} from {location}')
+
             file_content = download_file_from_box(
                 target_file,
                 folder_id,
@@ -146,8 +142,6 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
                 BOX_CLIENT_SECRET,
                 ENTERPRISE_ID
             )
-            found_location = location
-            print(f'[INFO] Successfully downloaded {target_file} from {location}')
             break
             
         except FileNotFoundError:
