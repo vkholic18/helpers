@@ -1,77 +1,180 @@
 # api/v1/reconciliation.py
 import csv
+import io
+import datetime
 from sqlalchemy.orm import Session
 from typing import Dict, List
 from common.db import Host
+from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
 
-def list_all_hosts_for_reconciliation(db_session: Session) -> Dict:
+
+# Box Configuration
+CLIENT_ID = "qdskgwhpn69qy70rcyq8diu1di723o4c"
+CLIENT_SECRET = "xxrvQcaZOra7w4jJGJpGwb1vu08ma8k7"
+ENTERPRISE_ID = "455328"
+BOX_FOLDERS = {
+    'DALST': '304823331811',
+    'TOKST': '305028378380'
+}
+
+
+def box_auth(client_id: str, client_secret: str, enterprise_id: str) -> BoxClient:
+    """Authenticate with Box and return a client."""
+    try:
+        print('[INFO] Authenticating BOX user')
+        ccg_config = CCGConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            enterprise_id=enterprise_id
+        )
+        print('[INFO] Getting client')
+        auth = BoxCCGAuth(config=ccg_config)
+        client = BoxClient(auth)
+        return client
+    except Exception as e:
+        print(f'[ERROR] There is an error authenticating box: {e}')
+        raise Exception(f'There is an error authenticating box: {e}') from e
+
+
+def download_file_from_box(
+        file_name: str, 
+        folder_id: str, 
+        client_id: str, 
+        client_secret: str, 
+        enterprise_id: str
+) -> str:
+    """Download a file from Box and return its content as a string."""
+    client = box_auth(client_id, client_secret, enterprise_id)
+
+    try:
+        print(f'[INFO] Validating folder: {folder_id}')
+        folder = client.folders.get_folder_items(folder_id=folder_id)
+        if folder is None:
+            print(f"[ERROR] Folder with ID {folder_id} does not exist")
+            raise Exception(f"Folder with ID {folder_id} does not exist")
+
+        items = folder.entries
+        for item in items:
+            if item.name == file_name:
+                file = client.downloads.download_file(item.id)
+                return file.read().decode('utf-8')
+
+        print(f'[INFO] File "{file_name}" not found')
+        raise FileNotFoundError(f'File "{file_name}" not found in folder {folder_id}')
+    except Exception as e:
+        raise Exception(f'Error downloading file {file_name} with error {e}') from e
+
+
+def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     """
-    Fetch all hosts and return them in API response format for reconciliation.
+    Download VM inventory from Box based on offering.
+    
+    Args:
+        offering: The offering type (e.g., 'VCFaas'). If None, tries all folders.
+    
+    Returns:
+        List of VM inventory records
     """
-    hosts = db_session.query(Host).all()
+    file_name = f'{datetime.datetime.now().strftime("%m-%d-%y")}_VM_Inventory.csv'
+    
+    # Determine which folders to check
+    if offering:
+        # Map offering to specific folder if needed
+        # For now, try all folders if offering is specified
+        folders_to_check = BOX_FOLDERS
+    else:
+        folders_to_check = BOX_FOLDERS
+    
+    vm_inventory = []
+    file_content = None
+    
+    # Try to find the file in Box folders
+    for location, folder_id in folders_to_check.items():
+        try:
+            print(f'[INFO] Checking {location} folder for {file_name}')
+            file_content = download_file_from_box(
+                file_name, 
+                folder_id, 
+                CLIENT_ID, 
+                CLIENT_SECRET, 
+                ENTERPRISE_ID
+            )
+            print(f'[INFO] Successfully downloaded {file_name} from {location}')
+            break
+        except FileNotFoundError:
+            print(f'[INFO] File not found in {location}, trying next folder')
+            continue
+        except Exception as e:
+            print(f'[ERROR] Error checking {location} folder: {e}')
+            continue
+    
+    if not file_content:
+        raise FileNotFoundError(f'VM Inventory file {file_name} not found in any Box folder')
+    
+    # Parse CSV content
+    csv_file = io.StringIO(file_content)
+    reader = csv.DictReader(csv_file)
+    # Strip whitespace from headers
+    reader.fieldnames = [name.strip() for name in reader.fieldnames]
+    
+    for row in reader:
+        vm_inventory.append({
+            "IP": row.get("IP", "").strip(),
+            "vCenter": row.get("vCenter", "").strip()
+        })
+    
+    return vm_inventory
+
+
+def list_all_hosts_for_reconciliation(db_session: Session) -> List[Dict]:
+    """
+    Fetch hosts with only the fields needed for reconciliation.
+    Only queries necessary fields for better performance.
+    """
+    # Query only the fields we actually need for reconciliation
+    hosts = db_session.query(
+        Host.ip_address,
+        Host.hostname,
+        Host.workload_domain
+    ).all()
+    
     host_list = [
         {
             "ip_address": host.ip_address,
             "hostname": host.hostname,
-            "domain_name": host.domain_name,
-            "datacenter": host.datacenter,
-            "platform": host.platform,
-            "environment": host.environment,
-            "serial_number": host.serial_number,
-            "user": host.user,
-            "registration_time": host.registration_time.isoformat(),
-            "block": host.block,
-            "host_type": host.host_type,
             "workload_domain": host.workload_domain,
-            "vcd_org": host.vcd_org,
         }
         for host in hosts
     ]
-    return {
-        "statusCode": 200,
-        "body": {
-            "status": "success",
-            "data": host_list,
-        },
-    }
+    return host_list
 
 
 def perform_inventory_reconciliation(
     db_session: Session, 
-    csv_file_path: str
+    offering: str = None
 ) -> Dict:
     """
-    Perform inventory reconciliation between VMCA hosts and VM inventory report.
+    Perform inventory reconciliation between VMCA hosts and VM inventory report from Box.
     
     Args:
         db_session: Database session
-        csv_file_path: Path to the CSV file containing VM inventory (with IP and vCenter columns)
+        offering: Optional offering type (e.g., 'VCFaas')
     
     Returns:
         Dictionary containing reconciliation results
     """
     # Get all hosts from VMCA
-    vmca_response = list_all_hosts_for_reconciliation(db_session)
-    vmca_hosts = vmca_response["body"]["data"]
+    vmca_hosts = list_all_hosts_for_reconciliation(db_session)
     
-    # Read VM inventory from CSV
-    vm_inventory = []
+    # Get VM inventory from Box
     try:
-        with open(csv_file_path, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            # Strip whitespace from headers
-            reader.fieldnames = [name.strip() for name in reader.fieldnames]
-            for row in reader:
-                vm_inventory.append({
-                    "IP": row.get("IP", "").strip(),
-                    "vCenter": row.get("vCenter", "").strip()
-                })
-    except FileNotFoundError:
+        vm_inventory = get_vm_inventory_from_box(offering)
+    except FileNotFoundError as e:
         return {
             "statusCode": 404,
             "body": {
                 "status": "error",
-                "message": f"CSV file not found: {csv_file_path}"
+                "message": str(e)
             }
         }
     except Exception as e:
@@ -79,24 +182,19 @@ def perform_inventory_reconciliation(
             "statusCode": 500,
             "body": {
                 "status": "error",
-                "message": f"Error reading CSV file: {str(e)}"
+                "message": f"Error reading VM inventory from Box: {str(e)}"
             }
         }
     
     # Create lookup dictionaries for O(1) comparison
-    # This allows fast IP-based matching instead of nested loops
     vmca_by_ip = {host["ip_address"]: host for host in vmca_hosts}
     vm_by_ip = {vm["IP"]: vm for vm in vm_inventory if vm["IP"]}
     
     # Reconciliation results - 4 categories
-    matched_hosts = []                    # IPs found in both, domains match
-    missing_in_vmca = []                  # In CSV but not in VMCA (gap)
-    missing_in_vm_inventory = []          # In VMCA but not in CSV (gap)
-    broader_servers_excluded = []         # In CSV but intentionally not in VMCA
-    
-    # === COMPARISON LOGIC ===
-    # Step 1: For each VMCA host, check if it exists in VM inventory
-    # Primary key for matching: IP Address
+    matched_hosts = []
+    missing_in_vmca = []
+    missing_in_vm_inventory = []
+    broader_servers_excluded = []
     
     # Check each VMCA host against VM inventory
     for ip, vmca_host in vmca_by_ip.items():
@@ -105,8 +203,7 @@ def perform_inventory_reconciliation(
             workload_domain = vmca_host.get("workload_domain", "")
             vcenter = vm["vCenter"]
             
-            # LOGIC: Check if workload_domain is substring of vCenter (as per point 3)
-            # Example: workload_domain="w381" should match vCenter="vcenter-w381-prod.domain.com"
+            # Check if workload_domain is substring of vCenter
             if workload_domain and workload_domain.lower() in vcenter.lower():
                 matched_hosts.append({
                     "ip_address": ip,
@@ -126,7 +223,6 @@ def perform_inventory_reconciliation(
                     "match_reason": f"IP matched but workload_domain '{workload_domain}' NOT found in vCenter '{vcenter}'"
                 })
         else:
-            # LOGIC: VMCA host not found in CSV - this is a missing host
             missing_in_vm_inventory.append({
                 "ip_address": ip,
                 "hostname": vmca_host.get("hostname"),
@@ -139,14 +235,11 @@ def perform_inventory_reconciliation(
         if ip not in vmca_by_ip:
             vcenter = vm["vCenter"]
             
-            # LOGIC (Point 4): Check if this is a broader server to exclude
-            # Broader servers are out of scope - they have vCenter patterns like:
-            # "dalm001-vc-m001.dalstdst.dir" or similar infrastructure servers
-            # These should be excluded from "missing" list as they're intentionally not in VMCA
+            # Check if this is a broader server to exclude
             is_broader_server = (
                 "dalm" in vcenter.lower() or 
                 "vc-m" in vcenter.lower() or
-                "-m0" in vcenter.lower()  # Infrastructure management servers
+                "-m0" in vcenter.lower()
             )
             
             if is_broader_server:
@@ -156,8 +249,6 @@ def perform_inventory_reconciliation(
                     "reason": "Broader server out of scope (infrastructure/management server)"
                 })
             else:
-                # LOGIC: VM exists in inventory but not registered in VMCA
-                # This could be a gap - hosts that should be registered
                 missing_in_vmca.append({
                     "ip_address": ip,
                     "vCenter": vcenter,
@@ -187,11 +278,15 @@ def perform_inventory_reconciliation(
     }
 
 
-def reconciliation_endpoint(db_session: Session, csv_file_path: str) -> Dict:
+def reconciliation_endpoint(db_session: Session, offering: str = None) -> Dict:
     """
     API endpoint for inventory reconciliation.
     
+    Args:
+        db_session: Database session
+        offering: Optional offering type (e.g., 'VCFaas')
+    
     Usage:
-        result = reconciliation_endpoint(db_session, "/path/to/vm_inventory.csv")
+        result = reconciliation_endpoint(db_session, offering="VCFaas")
     """
-    return perform_inventory_reconciliation(db_session, csv_file_path)
+    return perform_inventory_reconciliation(db_session, offering)
