@@ -4,7 +4,7 @@ import io
 import datetime
 import re
 from sqlalchemy.orm import Session
-from typing import Dict, List
+from typing import Dict, List, Optional
 from common.db import Host
 from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
 
@@ -17,81 +17,134 @@ BOX_FOLDER_DALST = os.getenv("BOX_FOLDER_DALST")
 BOX_FOLDER_TOKST = os.getenv("BOX_FOLDER_TOKST")
 
 
+class BoxAuthenticationError(Exception):
+    """Raised when Box authentication fails."""
+    pass
+
+
+class InventoryFileNotFoundError(Exception):
+    """Raised when a required file is not found."""
+    pass
+
+
 def box_auth(client_id: str, client_secret: str, enterprise_id: str) -> BoxClient:
-    """Authenticate with Box and return a client."""
+    """
+    Authenticate with Box and return a client.
+    
+    Args:
+        client_id: Box application client ID
+        client_secret: Box application client secret
+        enterprise_id: Box enterprise ID
+        
+    Returns:
+        BoxClient: Authenticated Box client
+        
+    Raises:
+        BoxAuthenticationError: If authentication fails
+    """
+    if not all([client_id, client_secret, enterprise_id]):
+        raise BoxAuthenticationError(
+            "Missing required Box credentials. Check BOX_CLIENT_ID, BOX_CLIENT_SECRET, and ENTERPRISE_ID environment variables."
+        )
+    
     try:
-        print('[INFO] Authenticating BOX user')
         ccg_config = CCGConfig(
             client_id=client_id,
             client_secret=client_secret,
             enterprise_id=enterprise_id
         )
-        print('[INFO] Getting client')
         auth = BoxCCGAuth(config=ccg_config)
         client = BoxClient(auth)
         return client
     except Exception as e:
-        print(f'[ERROR] There is an error authenticating box: {e}')
-        raise Exception(f'There is an error authenticating box: {e}') from e
+        raise BoxAuthenticationError(f'Box authentication failed: {str(e)}') from e
 
 
 def list_files_in_folder(folder_id: str, client: BoxClient) -> List[str]:
     """
     List all file names in a given Box folder.
+    
+    Args:
+        folder_id: Box folder ID
+        client: Authenticated Box client
+        
+    Returns:
+        List of file names in the folder
     """
     items = client.folders.get_folder_items(folder_id, limit=1000)
     file_names = [item.name for item in items.entries if item.type == "file"]
     return file_names
 
 
-def get_latest_inventory_file(file_names: List[str]) -> str:
+def get_latest_inventory_file(file_names: List[str]) -> Optional[str]:
     """
     Find the latest VM_Inventory.csv file by date in filename.
     Accepts files like MM-DD-YY_VM_Inventory.csv or MM-DD-YY_VM_Inventory-OLD.csv
+    
+    Args:
+        file_names: List of file names to search
+        
+    Returns:
+        Name of the latest inventory file, or None if not found
     """
     inventory_files = [
         f for f in file_names if re.match(r"\d{2}-\d{2}-\d{2}_VM_Inventory.*\.csv", f)
     ]
+    
     if not inventory_files:
         return None
-    # Sort by date in filename (MM-DD-YY)
-    inventory_files.sort(
-        key=lambda x: datetime.datetime.strptime(x[:8], "%m-%d-%y"), 
-        reverse=True
-    )
-    return inventory_files[0]
+    
+    try:
+        inventory_files.sort(
+            key=lambda x: datetime.datetime.strptime(x[:8], "%m-%d-%y"), 
+            reverse=True
+        )
+        return inventory_files[0]
+    except ValueError:
+        return None
 
 
 def download_file_from_box(
         file_name: str, 
         folder_id: str, 
-        client_id: str, 
-        client_secret: str, 
-        enterprise_id: str
+        client: BoxClient
 ) -> str:
-    """Download a file from Box and return its content as a string."""
-    client = box_auth(client_id, client_secret, enterprise_id)
-
+    """
+    Download a file from Box and return its content as a string.
+    
+    Args:
+        file_name: Name of the file to download
+        folder_id: Box folder ID containing the file
+        client: Authenticated Box client
+        
+    Returns:
+        File content as string
+        
+    Raises:
+        InventoryFileNotFoundError: If file is not found in folder
+        Exception: If download fails
+    """
     try:
-        print(f'[INFO] Validating folder: {folder_id}')
         folder = client.folders.get_folder_items(folder_id=folder_id)
+        
         if folder is None:
-            print(f"[ERROR] Folder with ID {folder_id} does not exist")
-            raise Exception(f"Folder with ID {folder_id} does not exist")
+            raise InventoryFileNotFoundError(f"Folder with ID {folder_id} does not exist")
 
         items = folder.entries
         for item in items:
             if item.name == file_name:
                 file = client.downloads.download_file(item.id)
-                return file.read().decode('utf-8')
+                content = file.read().decode('utf-8')
+                return content
 
-        print(f'[INFO] File "{file_name}" not found')
-        raise FileNotFoundError(f'File "{file_name}" not found in folder {folder_id}')
+        raise InventoryFileNotFoundError(f'File "{file_name}" not found in folder {folder_id}')
+    except InventoryFileNotFoundError:
+        raise
     except Exception as e:
-        raise Exception(f'Error downloading file {file_name} with error {e}') from e
+        raise Exception(f'Error downloading file {file_name}: {str(e)}') from e
 
 
-def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
+def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
     """
     Download VM inventory from Box based on offering.
     Tries today's file first, then falls back to latest available.
@@ -101,21 +154,30 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     
     Returns:
         List of VM inventory records
+        
+    Raises:
+        InventoryFileNotFoundError: If no inventory file is found
+        BoxAuthenticationError: If authentication fails
     """
     file_name_today = f'{datetime.datetime.now().strftime("%m-%d-%y")}_VM_Inventory.csv'
     
     # Determine which folders to check
-    # BOX_FOLDER_TOKST To be implemented 
-    folders_to_check = [ BOX_FOLDER_DALST ]
+    folders_to_check = [BOX_FOLDER_DALST]
+    if BOX_FOLDER_TOKST:
+        folders_to_check.append(BOX_FOLDER_TOKST)
+    
+    # Filter out None values
+    folders_to_check = [f for f in folders_to_check if f]
+    
+    if not folders_to_check:
+        raise ValueError("No Box folder IDs configured. Check BOX_FOLDER_DALST and BOX_FOLDER_TOKST environment variables.")
     
     vm_inventory = []
     file_content = None
     target_file = None
     
     # Authenticate once for all operations
-    print("[INFO] Authenticating BOX user")
-    auth = BoxCCGAuth(CCGConfig(CLIENT_ID, CLIENT_SECRET, enterprise_id=ENTERPRISE_ID))
-    client = BoxClient(auth)
+    client = box_auth(BOX_CLIENT_ID, BOX_CLIENT_SECRET, ENTERPRISE_ID)
     
     # Try to find the file in Box folders
     for folder_id in folders_to_check:
@@ -125,34 +187,22 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
             # Prefer today's file, else fallback to latest
             if file_name_today in file_names:
                 target_file = file_name_today
-                print(f'[INFO] Found today\'s file: {target_file}')
             else:
                 target_file = get_latest_inventory_file(file_names)
-                if target_file:
-                    print(f"[WARN] Today's file not found, falling back to latest available: {target_file}")
             
             if not target_file:
-                print(f'[INFO] No inventory file found trying next folder')
                 continue
 
-            file_content = download_file_from_box(
-                target_file,
-                folder_id,
-                BOX_CLIENT_ID,
-                BOX_CLIENT_SECRET,
-                ENTERPRISE_ID
-            )
+            file_content = download_file_from_box(target_file, folder_id, client)
             break
             
-        except FileNotFoundError:
-            print(f'[INFO] File not found in {location}, trying next folder')
+        except InventoryFileNotFoundError:
             continue
-        except Exception as e:
-            print(f'[ERROR] Error checking {location} folder: {e}')
+        except Exception:
             continue
     
     if not file_content:
-        raise FileNotFoundError(f'No VM Inventory file found in any Box folder')
+        raise InventoryFileNotFoundError('No VM Inventory file found in any Box folder')
     
     # Parse CSV content
     csv_file = io.StringIO(file_content)
@@ -160,14 +210,13 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     # Skip PowerShell header line if present (starts with #TYPE)
     first_line = csv_file.readline()
     if not first_line.startswith('#TYPE'):
-        # If it's not a PowerShell header, reset to beginning
         csv_file.seek(0)
     
     reader = csv.DictReader(csv_file)
-    print(f"[DEBUG] CSV headers: {reader.fieldnames}")
     
     # Strip whitespace from headers
-    reader.fieldnames = [name.strip() for name in reader.fieldnames]
+    if reader.fieldnames:
+        reader.fieldnames = [name.strip() if name else '' for name in reader.fieldnames]
     
     for row in reader:
         ips = row.get("IP", "").strip()
@@ -178,12 +227,13 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
         
         # Split multiple IPs on space and create separate entries
         for ip in ips.split():
-            vm_inventory.append({
-                "IP": ip.strip(),
-                "vCenter": vcenter
-            })
+            ip_cleaned = ip.strip()
+            if ip_cleaned:
+                vm_inventory.append({
+                    "IP": ip_cleaned,
+                    "vCenter": vcenter
+                })
     
-    print(f'[INFO] Parsed {len(vm_inventory)} VM records from {target_file}')
     return vm_inventory
 
 
@@ -191,8 +241,13 @@ def list_all_hosts_for_reconciliation(db_session: Session) -> List[Dict]:
     """
     Fetch hosts with only the fields needed for reconciliation.
     Only queries necessary fields for better performance.
+    
+    Args:
+        db_session: SQLAlchemy database session
+        
+    Returns:
+        List of host dictionaries with ip_address, hostname, and workload_domain
     """
-    # Query only the fields we actually need for reconciliation
     hosts = db_session.query(
         Host.ip_address,
         Host.hostname,
@@ -212,7 +267,7 @@ def list_all_hosts_for_reconciliation(db_session: Session) -> List[Dict]:
 
 def perform_inventory_reconciliation(
     db_session: Session, 
-    offering: str = None
+    offering: Optional[str] = None
 ) -> Dict:
     """
     Perform inventory reconciliation between VMCA hosts and VM inventory report from Box.
@@ -222,20 +277,37 @@ def perform_inventory_reconciliation(
         offering: Optional offering type (e.g., 'VCFaas')
     
     Returns:
-        Dictionary containing reconciliation results
+        Dictionary containing reconciliation results with statusCode and body
     """
     # Get all hosts from VMCA
-    vmca_hosts = list_all_hosts_for_reconciliation(db_session)
+    try:
+        vmca_hosts = list_all_hosts_for_reconciliation(db_session)
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": {
+                "status": "error",
+                "message": f"Error retrieving VMCA hosts: {str(e)}"
+            }
+        }
     
     # Get VM inventory from Box
     try:
         vm_inventory = get_vm_inventory_from_box(offering)
-    except FileNotFoundError as e:
+    except InventoryFileNotFoundError as e:
         return {
             "statusCode": 404,
             "body": {
                 "status": "error",
                 "message": str(e)
+            }
+        }
+    except BoxAuthenticationError as e:
+        return {
+            "statusCode": 401,
+            "body": {
+                "status": "error",
+                "message": f"Box authentication failed: {str(e)}"
             }
         }
     except Exception as e:
@@ -248,8 +320,8 @@ def perform_inventory_reconciliation(
         }
     
     # Create lookup dictionaries for O(1) comparison
-    vmca_by_ip = {host["ip_address"]: host for host in vmca_hosts}
-    vm_by_ip = {vm["IP"]: vm for vm in vm_inventory if vm["IP"]}
+    vmca_by_ip = {host["ip_address"]: host for host in vmca_hosts if host.get("ip_address")}
+    vm_by_ip = {vm["IP"]: vm for vm in vm_inventory if vm.get("IP")}
     
     # Reconciliation results - 4 categories
     matched_hosts = []
@@ -262,10 +334,10 @@ def perform_inventory_reconciliation(
         if ip in vm_by_ip:
             vm = vm_by_ip[ip]
             workload_domain = vmca_host.get("workload_domain", "")
-            vcenter = vm["vCenter"]
+            vcenter = vm.get("vCenter", "")
             
             # Check if workload_domain is substring of vCenter
-            if workload_domain and workload_domain.lower() in vcenter.lower():
+            if workload_domain and vcenter and workload_domain.lower() in vcenter.lower():
                 matched_hosts.append({
                     "ip_address": ip,
                     "hostname": vmca_host.get("hostname"),
@@ -294,13 +366,14 @@ def perform_inventory_reconciliation(
     # Check for VMs in inventory but not in VMCA
     for ip, vm in vm_by_ip.items():
         if ip not in vmca_by_ip:
-            vcenter = vm["vCenter"]
+            vcenter = vm.get("vCenter", "")
             
             # Check if this is a broader server to exclude
+            vcenter_lower = vcenter.lower()
             is_broader_server = (
-                "dalm" in vcenter.lower() or 
-                "vc-m" in vcenter.lower() or
-                "-m0" in vcenter.lower()
+                "dalm" in vcenter_lower or 
+                "vc-m" in vcenter_lower or
+                "-m0" in vcenter_lower
             )
             
             if is_broader_server:
@@ -339,7 +412,7 @@ def perform_inventory_reconciliation(
     }
 
 
-def reconciliation_endpoint(db_session: Session, offering: str = None) -> Dict:
+def reconciliation_endpoint(db_session: Session, offering: Optional[str] = None) -> Dict:
     """
     API endpoint for inventory reconciliation.
     
@@ -347,6 +420,9 @@ def reconciliation_endpoint(db_session: Session, offering: str = None) -> Dict:
         db_session: Database session
         offering: Optional offering type (e.g., 'VCFaas')
     
+    Returns:
+        Dictionary with statusCode and body containing reconciliation results
+        
     Usage:
         result = reconciliation_endpoint(db_session, offering="VCFaas")
     """
