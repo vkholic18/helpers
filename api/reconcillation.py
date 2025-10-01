@@ -2,6 +2,7 @@
 import csv
 import io
 import datetime
+import re
 from sqlalchemy.orm import Session
 from typing import Dict, List
 from common.db import Host
@@ -36,6 +37,33 @@ def box_auth(client_id: str, client_secret: str, enterprise_id: str) -> BoxClien
         raise Exception(f'There is an error authenticating box: {e}') from e
 
 
+def list_files_in_folder(folder_id: str, client: BoxClient) -> List[str]:
+    """
+    List all file names in a given Box folder.
+    """
+    items = client.folders.get_folder_items(folder_id, limit=1000)
+    file_names = [item.name for item in items.entries if item.type == "file"]
+    return file_names
+
+
+def get_latest_inventory_file(file_names: List[str]) -> str:
+    """
+    Find the latest VM_Inventory.csv file by date in filename.
+    Accepts files like MM-DD-YY_VM_Inventory.csv or MM-DD-YY_VM_Inventory-OLD.csv
+    """
+    inventory_files = [
+        f for f in file_names if re.match(r"\d{2}-\d{2}-\d{2}_VM_Inventory.*\.csv", f)
+    ]
+    if not inventory_files:
+        return None
+    # Sort by date in filename (MM-DD-YY)
+    inventory_files.sort(
+        key=lambda x: datetime.datetime.strptime(x[:8], "%m-%d-%y"), 
+        reverse=True
+    )
+    return inventory_files[0]
+
+
 def download_file_from_box(
         file_name: str, 
         folder_id: str, 
@@ -68,6 +96,7 @@ def download_file_from_box(
 def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     """
     Download VM inventory from Box based on offering.
+    Tries today's file first, then falls back to latest available.
     
     Args:
         offering: The offering type (e.g., 'VCFaas'). If None, tries all folders.
@@ -75,32 +104,53 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
     Returns:
         List of VM inventory records
     """
-    file_name = f'{datetime.datetime.now().strftime("%m-%d-%y")}_VM_Inventory.csv'
+    file_name_today = f'{datetime.datetime.now().strftime("%m-%d-%y")}_VM_Inventory.csv'
     
     # Determine which folders to check
-    if offering:
-        # Map offering to specific folder if needed
-        # For now, try all folders if offering is specified
-        folders_to_check = BOX_FOLDERS
-    else:
-        folders_to_check = BOX_FOLDERS
+    folders_to_check = BOX_FOLDERS
     
     vm_inventory = []
     file_content = None
+    target_file = None
+    found_location = None
+    
+    # Authenticate once for all operations
+    print("[INFO] Authenticating BOX user")
+    auth = BoxCCGAuth(CCGConfig(CLIENT_ID, CLIENT_SECRET, enterprise_id=ENTERPRISE_ID))
+    client = BoxClient(auth)
     
     # Try to find the file in Box folders
     for location, folder_id in folders_to_check.items():
         try:
-            print(f'[INFO] Checking {location} folder for {file_name}')
+            print(f'[INFO] Checking files in {location} folder')
+            file_names = list_files_in_folder(folder_id, client)
+            print(f'[DEBUG] Files in {location}: {file_names}')
+            
+            # Prefer today's file, else fallback to latest
+            if file_name_today in file_names:
+                target_file = file_name_today
+                print(f'[INFO] Found today\'s file: {target_file}')
+            else:
+                target_file = get_latest_inventory_file(file_names)
+                if target_file:
+                    print(f"[WARN] Today's file not found, falling back to latest available: {target_file}")
+            
+            if not target_file:
+                print(f'[INFO] No inventory file found in {location}, trying next folder')
+                continue
+            
+            print(f'[INFO] Downloading {target_file} from {location}')
             file_content = download_file_from_box(
-                file_name, 
-                folder_id, 
-                CLIENT_ID, 
-                CLIENT_SECRET, 
+                target_file,
+                folder_id,
+                CLIENT_ID,
+                CLIENT_SECRET,
                 ENTERPRISE_ID
             )
-            print(f'[INFO] Successfully downloaded {file_name} from {location}')
+            found_location = location
+            print(f'[INFO] Successfully downloaded {target_file} from {location}')
             break
+            
         except FileNotFoundError:
             print(f'[INFO] File not found in {location}, trying next folder')
             continue
@@ -109,20 +159,38 @@ def get_vm_inventory_from_box(offering: str = None) -> List[Dict]:
             continue
     
     if not file_content:
-        raise FileNotFoundError(f'VM Inventory file {file_name} not found in any Box folder')
+        raise FileNotFoundError(f'No VM Inventory file found in any Box folder')
     
     # Parse CSV content
     csv_file = io.StringIO(file_content)
+    
+    # Skip PowerShell header line if present (starts with #TYPE)
+    first_line = csv_file.readline()
+    if not first_line.startswith('#TYPE'):
+        # If it's not a PowerShell header, reset to beginning
+        csv_file.seek(0)
+    
     reader = csv.DictReader(csv_file)
+    print(f"[DEBUG] CSV headers: {reader.fieldnames}")
+    
     # Strip whitespace from headers
     reader.fieldnames = [name.strip() for name in reader.fieldnames]
     
     for row in reader:
-        vm_inventory.append({
-            "IP": row.get("IP", "").strip(),
-            "vCenter": row.get("vCenter", "").strip()
-        })
+        ips = row.get("IP", "").strip()
+        vcenter = row.get("vCenter", "").strip()
+        
+        if not ips:
+            continue
+        
+        # Split multiple IPs on space and create separate entries
+        for ip in ips.split():
+            vm_inventory.append({
+                "IP": ip.strip(),
+                "vCenter": vcenter
+            })
     
+    print(f'[INFO] Parsed {len(vm_inventory)} VM records from {target_file}')
     return vm_inventory
 
 
