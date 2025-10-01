@@ -10,13 +10,11 @@ from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
 
 
 # Box Configuration
-CLIENT_ID = "qdskgwhpn69qy70rcyq8diu1di723o4c"
-CLIENT_SECRET = "xxrvQcaZOra7w4jJGJpGwb1vu08ma8k7"
-ENTERPRISE_ID = "455328"
-BOX_FOLDERS = {
-    'DALST': '304823331811'
-    #'TOKST': '305028378380'
-}
+BOX_CLIENT_ID = os.getenv("BOX_CLIENT_ID")
+BOX_CLIENT_SECRET = os.getenv("BOX_CLIENT_SECRET") 
+ENTERPRISE_ID = os.getenv("ENTERPRISE_ID")
+BOX_FOLDER_DALST = os.getenv("BOX_FOLDER_DALST")
+BOX_FOLDER_TOKST = os.getenv("BOX_FOLDER_TOKST")
 
 
 def box_auth(client_id: str, client_secret: str, enterprise_id: str) -> BoxClient:
