@@ -90,73 +90,79 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
     # Updated filename pattern from VM_Inventory to vCD_Inventory
     file_name_today = f'{datetime.datetime.now().strftime("%m-%d-%y")}_vCD_Inventory.csv'
     
-    # Check both folders 
+    # Check both folders right away
     folders_to_check = [BOX_FOLDER_DALST, BOX_FOLDER_TOKST]
-
+    
 
     if not folders_to_check:
         raise ValueError("No Box folder IDs configured. Check BOX_FOLDER_DALST and BOX_FOLDER_TOKST environment variables.")
 
     vm_inventory = []
-    file_content = None
-    target_file = None
     client = box_auth(BOX_CLIENT_ID, BOX_CLIENT_SECRET, ENTERPRISE_ID)
+    files_found = []
 
+    # Check all folders and collect files from each
     for folder_id in folders_to_check:
         try:
             file_names = list_files_in_folder(folder_id, client)
+            target_file = None
+            
             if file_name_today in file_names:
                 target_file = file_name_today
             else:
                 target_file = get_latest_inventory_file(file_names)
             
             if not target_file:
-                # Moved validation inside the loop
-                raise InventoryFileNotFoundError(f'No vCD Inventory file found in folder {folder_id}')
+                # No inventory file found in this folder, continue to next
+                continue
             
             file_content = download_file_from_box(target_file, folder_id, client)
-            break
+            files_found.append((folder_id, target_file, file_content))
+            
         except InventoryFileNotFoundError:
             continue
         except Exception:
             continue
 
-    if not file_content:
+    if not files_found:
         raise InventoryFileNotFoundError('No vCD Inventory file found in any Box folder')
 
-    csv_file = io.StringIO(file_content)
-    first_line = csv_file.readline()
-    if not first_line.startswith('#TYPE'):
-        csv_file.seek(0)
+    # Process all found files
+    for folder_id, target_file, file_content in files_found:
+        csv_file = io.StringIO(file_content)
+        first_line = csv_file.readline()
+        if not first_line.startswith('#TYPE'):
+            csv_file.seek(0)
 
-    reader = csv.DictReader(csv_file)
-    
-    # Handle case where reader.fieldnames might be None
-    if not reader.fieldnames:
-        raise ValueError("CSV file has no headers or is empty")
-    
-    reader.fieldnames = [name.strip() if name else '' for name in reader.fieldnames]
-
-    for row in reader:
-        ips = row.get("IP", "").strip()
-        vcenter = row.get("vCenter", "").strip()
-        org = row.get("Org", "").strip()  # Added Org column
+        reader = csv.DictReader(csv_file)
         
-        if not ips:
+        # Handle case where reader.fieldnames might be None
+        if not reader.fieldnames:
             continue
         
-        # Filter out entries with Org name as "public-catalog"
-        if org.lower() == "public-catalog":
-            continue
+        reader.fieldnames = [name.strip() if name else '' for name in reader.fieldnames]
+
+        for row in reader:
+            ips = row.get("IP", "").strip()
+            vcenter = row.get("vCenter", "").strip()
+            org = row.get("Org", "").strip()  # Added Org column
             
-        for ip in ips.split():
-            ip_cleaned = ip.strip()
-            if ip_cleaned:
-                vm_inventory.append({
-                    "IP": ip_cleaned,
-                    "vCenter": vcenter,
-                    "Org": org  # Include Org in inventory
-                })
+            if not ips:
+                continue
+            
+            # Filter out entries with Org name as "public-catalog"
+            if org.lower() == "public-catalog":
+                continue
+                
+            for ip in ips.split():
+                ip_cleaned = ip.strip()
+                if ip_cleaned:
+                    vm_inventory.append({
+                        "IP": ip_cleaned,
+                        "vCenter": vcenter,
+                        "Org": org  # Include Org in inventory
+                    })
+    
     return vm_inventory
 
 
