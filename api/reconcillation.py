@@ -177,10 +177,10 @@ def list_all_hosts_for_reconciliation(db_session: Session, offering: Optional[st
     
     # Filter by offering - only VCFaaS for now, will filter out VCS later
     if offering:
-        query = query.filter(Host.offering == offering)
+        query = query.filter(Host.host_type  == offering)
     else:
         # Default to VCFaaS when offering is None
-        query = query.filter(Host.offering == "VCFaaS")
+        query = query.filter(Host.host_type  == "VCFaaS")
     
     hosts = query.all()
     
