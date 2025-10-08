@@ -280,8 +280,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
                 "hostname": vmca_host.get("hostname"),
                 "workload_domain": vmca_host.get("workload_domain"),
                 "user": vmca_host.get("user"),
-                "vcd_org": vmca_host.get("vcd_org"),
-                "reason": "Host registered in VMCA but not found in VM inventory report"
+                "vcd_org": vmca_host.get("vcd_org")
             })
 
     # Compare VM inventory with VMCA
@@ -290,8 +289,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
             missing_in_vmca.append({
                 "ip_address": ip,
                 "vCD": vm.get("vCD"),
-                "Org": vm.get("Org"),
-                "reason": "Found in VM inventory but not registered in VMCA"
+                "Org": vm.get("Org")
             })
 
     return {
@@ -308,10 +306,22 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
             },
             "offerings": {
                 "VCFaaS": {
-                    "matched_hosts": matched_hosts,
-                    "missing_in_vmca": missing_in_vmca,
-                    "not_deployed": not_deployed,
-                    "duplicates": duplicates
+                    "matched_hosts": {
+                        "description": "Hosts that are registered in VMCA and found in VM inventory with matching workload_domain and Org",
+                        "hosts": matched_hosts
+                    },
+                    "missing_in_vmca": {
+                        "description": "Found in VM inventory but not registered in VMCA",
+                        "hosts": missing_in_vmca
+                    },
+                    "not_deployed": {
+                        "description": "Host registered in VMCA but not found in VM inventory report",
+                        "hosts": not_deployed
+                    },
+                    "duplicates": {
+                        "description": "Hosts with matching IP but mismatched workload_domain, vCD, or Org fields",
+                        "hosts": duplicates
+                    }
                 }
             }
         }
