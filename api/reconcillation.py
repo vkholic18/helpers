@@ -169,7 +169,7 @@ def list_all_hosts_for_reconciliation(db_session: Session, offering: Optional[st
         Host.hostname,
         Host.workload_domain,
         Host.user,
-        Host.org  # Added org field
+        Host.vcd_org  # Added vcd_org field
     )
     
     # Filter by offering - only VCFaaS for now
@@ -187,7 +187,7 @@ def list_all_hosts_for_reconciliation(db_session: Session, offering: Optional[st
             "hostname": host.hostname,
             "workload_domain": host.workload_domain,
             "user": host.user,
-            "org": host.org,  # Include org in response
+            "vcd_org": host.vcd_org,  # Include vcd_org in response
         }
         for host in hosts
     ]
@@ -248,17 +248,17 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
             workload_domain = vmca_host.get("workload_domain", "")
             vcd = vm.get("vCD", "")
             vm_org = vm.get("Org", "")
-            vmca_org = vmca_host.get("org", "")
+            vmca_vcd_org = vmca_host.get("vcd_org", "")
             
             # Check if workload_domain matches vCD and org matches
             if (workload_domain and vcd and workload_domain.lower() in vcd.lower() and 
-                vmca_org and vm_org and vmca_org.lower() == vm_org.lower()):
+                vmca_vcd_org and vm_org and vmca_vcd_org.lower() == vm_org.lower()):
                 matched_hosts.append({
                     "ip_address": ip,
                     "hostname": vmca_host.get("hostname"),
                     "workload_domain": workload_domain,
                     "user": vmca_host.get("user"),
-                    "org": vmca_org,
+                    "vcd_org": vmca_vcd_org,
                     "vCD": vcd,
                     "match_status": "matched",
                     "match_reason": f"workload_domain '{workload_domain}' found in vCD '{vcd}' and Org matched"
@@ -270,7 +270,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
                     "hostname": vmca_host.get("hostname"),
                     "workload_domain": workload_domain,
                     "user": vmca_host.get("user"),
-                    "vmca_org": vmca_org,
+                    "vmca_vcd_org": vmca_vcd_org,
                     "vCD": vcd,
                     "vm_org": vm_org
                 })
@@ -280,7 +280,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
                 "hostname": vmca_host.get("hostname"),
                 "workload_domain": vmca_host.get("workload_domain"),
                 "user": vmca_host.get("user"),
-                "org": vmca_host.get("org"),
+                "vcd_org": vmca_host.get("vcd_org"),
                 "reason": "Host registered in VMCA but not found in VM inventory report"
             })
 
