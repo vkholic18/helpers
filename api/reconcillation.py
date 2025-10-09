@@ -3,14 +3,10 @@ import csv
 import io
 import datetime
 import re
-import logging
 from sqlalchemy.orm import Session
 from typing import Dict, List, Optional
 from common.db import Host
 from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
-
-# Setup logging
-logger = logging.getLogger(__name__)
 
 # Box Configuration
 BOX_CLIENT_ID = os.getenv("BOX_CLIENT_ID")
@@ -113,14 +109,14 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
             
             if not target_file:
                 # Log the error and raise exception
-                logger.error(f"No inventory file found in folder {folder_id}")
+                print(f"ERROR: No inventory file found in folder {folder_id}")
                 raise Exception(f"No inventory file found in Box folder {folder_id}")
             
             file_content = download_file_from_box(target_file, folder_id, client)
             files_found.append((folder_id, target_file, file_content))
             
         except Exception as e:
-            logger.error(f"Error retrieving inventory from folder {folder_id}: {str(e)}")
+            print(f"ERROR: Error retrieving inventory from folder {folder_id}: {str(e)}")
             raise Exception("Error when trying to retrieve inventory reports. Please retry it later") from e
 
     # Process all found files
@@ -134,7 +130,7 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
         
         # Raise error if fieldnames is None
         if not reader.fieldnames:
-            logger.error(f"CSV file from folder {folder_id} has no fieldnames/headers")
+            print(f"ERROR: CSV file from folder {folder_id} has no fieldnames/headers")
             raise Exception("Error when trying to retrieve inventory reports. Please retry it later")
         
         reader.fieldnames = [name.strip() if name else '' for name in reader.fieldnames]
@@ -143,6 +139,7 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
             ips = row.get("IP", "").strip()
             vcd = row.get("vCD", "").strip()  # Changed from vCenter to vCD
             org = row.get("Org", "").strip()
+            name = row.get("Name", "").strip()  # Added Name column for reference
             
             if not ips:
                 continue
@@ -157,7 +154,8 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
                     vm_inventory.append({
                         "IP": ip_cleaned,
                         "vCD": vcd,  # Changed from vCenter to vCD
-                        "Org": org
+                        "Org": org,
+                        "Name": name  # Include Name for reference
                     })
     
     return vm_inventory
@@ -197,7 +195,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
     try:
         vmca_hosts = list_all_hosts_for_reconciliation(db_session, offering)
     except Exception as e:
-        logger.error(f"Error retrieving VMCA hosts: {str(e)}")
+        print(f"ERROR: Error retrieving VMCA hosts: {str(e)}")
         return {
             "statusCode": 500,
             "body": {"status": "error", "message": f"Error retrieving VMCA hosts: {str(e)}"}
@@ -210,7 +208,7 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
     except BoxAuthenticationError as e:
         return {"statusCode": 401, "body": {"status": "error", "message": f"Box authentication failed: {str(e)}"}}
     except Exception as e:
-        logger.error(f"Error reading VM inventory from Box: {str(e)}")
+        print(f"ERROR: Error reading VM inventory from Box: {str(e)}")
         return {"statusCode": 500, "body": {"status": "error", "message": "Error when trying to retrieve inventory reports. Please retry it later"}}
 
     # Build VMCA lookup (no need to check duplicates as ip_address is primary key)
@@ -232,7 +230,8 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
                 duplicates.append({
                     "ip_address": ip,
                     "vCD": vm.get("vCD"),
-                    "Org": vm.get("Org")
+                    "Org": vm.get("Org"),
+                    "Name": vm.get("Name")  # Include Name for reference
                 })
         else:
             vm_by_ip[ip] = vm
@@ -289,7 +288,8 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
             missing_in_vmca.append({
                 "ip_address": ip,
                 "vCD": vm.get("vCD"),
-                "Org": vm.get("Org")
+                "Org": vm.get("Org"),
+                "Name": vm.get("Name")  # Include Name for reference
             })
 
     return {
