@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, MagicMock
 from sqlalchemy.orm import Session
 from api.v1 import reconciliation
 from api.v1.reconciliation import BoxAuthenticationError, InventoryFileNotFoundError
@@ -34,17 +34,25 @@ class TestReconciliation(unittest.TestCase):
     @patch("api.v1.reconciliation.box_auth")
     def test_get_vm_inventory_from_box_success(self, mock_auth, mock_list, mock_download):
         with patch("api.v1.reconciliation.BOX_FOLDER_DALST", "dalst"), \
+             patch("api.v1.reconciliation.BOX_FOLDER_TOKST", "tokst"), \
              patch("api.v1.reconciliation.BOX_CLIENT_ID", "id"), \
              patch("api.v1.reconciliation.BOX_CLIENT_SECRET", "secret"), \
              patch("api.v1.reconciliation.ENTERPRISE_ID", "ent"):
 
             mock_auth.return_value = Mock()
+            # Mock list_files_in_folder to return the file for both folders
             mock_list.return_value = ["09-29-25_vCD_Inventory.csv"]
+            # Mock download to return the same content (simulating same file in both folders)
             mock_download.return_value = "IP,vCD,Org,Name\n10.0.0.1,vc1,org1,host1"
 
             vms = reconciliation.get_vm_inventory_from_box()
-            expected = [{"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"}]
-            # Use assertCountEqual to ignore order issues
+            
+            # Since both folders return the same file with same content, we get duplicates
+            # Each folder contributes one entry, so we expect 2 identical entries
+            expected = [
+                {"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"},
+                {"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"}
+            ]
             self.assertCountEqual(vms, expected)
 
     @patch("api.v1.reconciliation.box_auth", side_effect=BoxAuthenticationError("fail"))
@@ -55,9 +63,11 @@ class TestReconciliation(unittest.TestCase):
     @patch("api.v1.reconciliation.list_files_in_folder", return_value=[])
     @patch("api.v1.reconciliation.box_auth", return_value=Mock())
     def test_get_vm_inventory_from_box_no_files(self, *_):
-        with self.assertRaises(Exception) as context:
-            reconciliation.get_vm_inventory_from_box()
-        self.assertIn("Error when trying to retrieve inventory reports", str(context.exception))
+        with patch("api.v1.reconciliation.BOX_FOLDER_DALST", "dalst"), \
+             patch("api.v1.reconciliation.BOX_FOLDER_TOKST", "tokst"):
+            with self.assertRaises(Exception) as context:
+                reconciliation.get_vm_inventory_from_box()
+            self.assertIn("Error when trying to retrieve inventory reports", str(context.exception))
 
     # ---------------- list_all_hosts_for_reconciliation ----------------
     def test_list_all_hosts_for_reconciliation(self):
@@ -69,10 +79,15 @@ class TestReconciliation(unittest.TestCase):
             user="user1",
             vcd_org="org1"
         )
-        # Ensure query().all() returns a list
-        mock_session.query.return_value.all.return_value = [mock_host]
+        
+        # Properly chain the mock query
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.all.return_value = [mock_host]
 
         hosts = reconciliation.list_all_hosts_for_reconciliation(mock_session)
+        self.assertEqual(len(hosts), 1)
         self.assertEqual(hosts[0]["hostname"], "host1")
         self.assertEqual(hosts[0]["vcd_org"], "org1")
 
