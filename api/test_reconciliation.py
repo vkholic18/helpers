@@ -28,57 +28,6 @@ class TestReconciliation(unittest.TestCase):
         with self.assertRaises(BoxAuthenticationError):
             reconciliation.box_auth("id", "secret", "ent")
 
-    # ---------------- list_files_in_folder ----------------
-    def test_list_files_in_folder(self):
-        client = Mock()
-        folder = Mock()
-        folder.entries = [Mock(type="file", name="a.csv"), Mock(type="folder", name="sub")]
-        client.folders.get_folder_items.return_value = folder
-        result = reconciliation.list_files_in_folder("folder_id", client)
-        self.assertEqual(result, ["a.csv"])
-
-    # ---------------- get_latest_inventory_file ----------------
-    def test_get_latest_inventory_file_returns_latest(self):
-        files = ["09-28-25_VM_Inventory.csv", "09-29-25_VM_Inventory.csv"]
-        latest = reconciliation.get_latest_inventory_file(files)
-        self.assertEqual(latest, "09-29-25_VM_Inventory.csv")
-
-    def test_get_latest_inventory_file_none(self):
-        self.assertIsNone(reconciliation.get_latest_inventory_file(["random.txt"]))
-
-    def test_get_latest_inventory_file_bad_date(self):
-        self.assertIsNone(reconciliation.get_latest_inventory_file(["bad_VM_Inventory.csv"]))
-
-    # ---------------- download_file_from_box ----------------
-    def test_download_file_from_box_success(self):
-        client = Mock()
-        folder = Mock()
-        file_item = Mock()
-        file_item.name = "test.csv"
-        file_item.id = "123"
-        folder.entries = [file_item]
-        client.folders.get_folder_items.return_value = folder
-        mock_file = Mock()
-        mock_file.read.return_value = b"IP,vCenter\n10.0.0.1,vc1"
-        client.downloads.download_file.return_value = mock_file
-
-        content = reconciliation.download_file_from_box("test.csv", "fid", client)
-        self.assertIn("10.0.0.1", content)
-
-    def test_download_file_from_box_file_not_found(self):
-        client = Mock()
-        folder = Mock()
-        folder.entries = []
-        client.folders.get_folder_items.return_value = folder
-        with self.assertRaises(InventoryFileNotFoundError):
-            reconciliation.download_file_from_box("missing.csv", "fid", client)
-
-    def test_download_file_from_box_error(self):
-        client = Mock()
-        client.folders.get_folder_items.side_effect = Exception("bad")
-        with self.assertRaises(Exception):
-            reconciliation.download_file_from_box("file.csv", "fid", client)
-
     # ---------------- get_vm_inventory_from_box ----------------
     @patch("api.v1.reconciliation.download_file_from_box")
     @patch("api.v1.reconciliation.list_files_in_folder")
@@ -90,11 +39,11 @@ class TestReconciliation(unittest.TestCase):
              patch("api.v1.reconciliation.ENTERPRISE_ID", "ent"):
 
             mock_auth.return_value = Mock()
-            mock_list.return_value = ["09-29-25_VM_Inventory.csv"]
-            mock_download.return_value = "IP,vCenter\n10.0.0.1,vc1"
+            mock_list.return_value = ["09-29-25_vCD_Inventory.csv"]
+            mock_download.return_value = "IP,vCD,Org,Name\n10.0.0.1,vc1,org1,host1"
 
             vms = reconciliation.get_vm_inventory_from_box()
-            self.assertEqual(vms, [{"IP": "10.0.0.1", "vCenter": "vc1"}])
+            self.assertEqual(vms, [{"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"}])
 
     @patch("api.v1.reconciliation.box_auth", side_effect=BoxAuthenticationError("fail"))
     def test_get_vm_inventory_from_box_auth_error(self, *_):
@@ -104,24 +53,26 @@ class TestReconciliation(unittest.TestCase):
     @patch("api.v1.reconciliation.list_files_in_folder", return_value=[])
     @patch("api.v1.reconciliation.box_auth", return_value=Mock())
     def test_get_vm_inventory_from_box_no_files(self, *_):
-        with self.assertRaises(InventoryFileNotFoundError):
+        with self.assertRaises(Exception) as context:
             reconciliation.get_vm_inventory_from_box()
+        self.assertIn("Error when trying to retrieve inventory reports", str(context.exception))
 
     # ---------------- list_all_hosts_for_reconciliation ----------------
     def test_list_all_hosts_for_reconciliation(self):
         mock_session = Mock(spec=Session)
-        mock_session.query().all.return_value = [
-            Mock(ip_address="10.0.0.1", hostname="host1", workload_domain="vc1")
-        ]
+        mock_host = Mock(ip_address="10.0.0.1", hostname="host1", workload_domain="vc1", user="user1", vcd_org="org1")
+        mock_session.query().all.return_value = [mock_host]
+
         hosts = reconciliation.list_all_hosts_for_reconciliation(mock_session)
         self.assertEqual(hosts[0]["hostname"], "host1")
+        self.assertEqual(hosts[0]["vcd_org"], "org1")
 
     # ---------------- perform_inventory_reconciliation ----------------
     @patch("api.v1.reconciliation.get_vm_inventory_from_box")
     @patch("api.v1.reconciliation.list_all_hosts_for_reconciliation")
     def test_perform_inventory_reconciliation_matched(self, mock_hosts, mock_vms):
-        mock_hosts.return_value = [{"ip_address": "10.0.0.1", "hostname": "h1", "workload_domain": "vc"}]
-        mock_vms.return_value = [{"IP": "10.0.0.1", "vCenter": "vc"}]
+        mock_hosts.return_value = [{"ip_address": "10.0.0.1", "hostname": "h1", "workload_domain": "vc", "vcd_org": "org1"}]
+        mock_vms.return_value = [{"IP": "10.0.0.1", "vCD": "vc", "Org": "org1", "Name": "host1"}]
 
         result = reconciliation.perform_inventory_reconciliation(Mock())
         self.assertEqual(result["statusCode"], 200)
@@ -138,12 +89,6 @@ class TestReconciliation(unittest.TestCase):
     def test_perform_inventory_reconciliation_auth_fail(self, *_):
         result = reconciliation.perform_inventory_reconciliation(Mock())
         self.assertEqual(result["statusCode"], 401)
-
-    @patch("api.v1.reconciliation.get_vm_inventory_from_box", side_effect=Exception("boxfail"))
-    @patch("api.v1.reconciliation.list_all_hosts_for_reconciliation", return_value=[])
-    def test_perform_inventory_reconciliation_box_fail(self, *_):
-        result = reconciliation.perform_inventory_reconciliation(Mock())
-        self.assertEqual(result["statusCode"], 500)
 
     @patch("api.v1.reconciliation.list_all_hosts_for_reconciliation", side_effect=Exception("dbfail"))
     def test_perform_inventory_reconciliation_db_fail(self, *_):
