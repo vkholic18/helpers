@@ -43,7 +43,9 @@ class TestReconciliation(unittest.TestCase):
             mock_download.return_value = "IP,vCD,Org,Name\n10.0.0.1,vc1,org1,host1"
 
             vms = reconciliation.get_vm_inventory_from_box()
-            self.assertEqual(vms, [{"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"}])
+            expected = [{"IP": "10.0.0.1", "vCD": "vc1", "Org": "org1", "Name": "host1"}]
+            # Use assertCountEqual to ignore order issues
+            self.assertCountEqual(vms, expected)
 
     @patch("api.v1.reconciliation.box_auth", side_effect=BoxAuthenticationError("fail"))
     def test_get_vm_inventory_from_box_auth_error(self, *_):
@@ -60,8 +62,15 @@ class TestReconciliation(unittest.TestCase):
     # ---------------- list_all_hosts_for_reconciliation ----------------
     def test_list_all_hosts_for_reconciliation(self):
         mock_session = Mock(spec=Session)
-        mock_host = Mock(ip_address="10.0.0.1", hostname="host1", workload_domain="vc1", user="user1", vcd_org="org1")
-        mock_session.query().all.return_value = [mock_host]
+        mock_host = Mock(
+            ip_address="10.0.0.1",
+            hostname="host1",
+            workload_domain="vc1",
+            user="user1",
+            vcd_org="org1"
+        )
+        # Ensure query().all() returns a list
+        mock_session.query.return_value.all.return_value = [mock_host]
 
         hosts = reconciliation.list_all_hosts_for_reconciliation(mock_session)
         self.assertEqual(hosts[0]["hostname"], "host1")
