@@ -258,9 +258,8 @@ def perform_inventory_reconciliation(db_session: Session, offering: Optional[str
                     "workload_domain": workload_domain,
                     "user": vmca_host.get("user"),
                     "vcd_org": vmca_vcd_org,
-                    "vCD": vcd,
-                    "match_status": "matched",
-                    "match_reason": f"workload_domain '{workload_domain}' found in vCD '{vcd}' and Org matched"
+                    "vCD": vcd
+                    
                 })
             else:
                 # Mismatch - this is a duplicate
