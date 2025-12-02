@@ -1,4 +1,3 @@
-
 import os
 import csv
 import io
@@ -7,7 +6,9 @@ import re
 from sqlalchemy.orm import Session
 from typing import Dict, List, Optional
 from common.db import Host
+from register_hosts import register_hosts  # <-- added
 from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
+
 
 BOX_CLIENT_ID = os.getenv("BOX_CLIENT_ID")
 BOX_CLIENT_SECRET = os.getenv("BOX_CLIENT_SECRET")
@@ -17,21 +18,17 @@ BOX_FOLDER_TOKST = os.getenv("BOX_FOLDER_TOKST")
 
 
 class BoxAuthenticationError(Exception):
-    """Raised when Box authentication fails."""
-
     pass
 
 
 class InventoryFileNotFoundError(Exception):
-    """Raised when a required file is not found."""
-
     pass
 
 
 def box_auth(client_id: str, client_secret: str, enterprise_id: str) -> BoxClient:
     if not all([client_id, client_secret, enterprise_id]):
         raise BoxAuthenticationError(
-            "Missing required Box credentials. Check BOX_CLIENT_ID, BOX_CLIENT_SECRET, and ENTERPRISE_ID environment variables."
+            "Missing required Box credentials. Check BOX_CLIENT_ID, BOX_CLIENT_SECRET, and ENTERPRISE_ID env vars."
         )
     try:
         ccg_config = CCGConfig(
@@ -97,9 +94,7 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
     folders_to_check = [BOX_FOLDER_DALST, BOX_FOLDER_TOKST]
 
     if not folders_to_check:
-        raise ValueError(
-            "No Box folder IDs configured. Check BOX_FOLDER_DALST and BOX_FOLDER_TOKST environment variables."
-        )
+        raise ValueError("No Box folder IDs configured.")
 
     vm_inventory = []
     client = box_auth(BOX_CLIENT_ID, BOX_CLIENT_SECRET, ENTERPRISE_ID)
@@ -108,27 +103,22 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
     for folder_id in folders_to_check:
         try:
             file_names = list_files_in_folder(folder_id, client)
-            target_file = None
-
-            if file_name_today in file_names:
-                target_file = file_name_today
-            else:
-                target_file = get_latest_inventory_file(file_names)
+            target_file = (
+                file_name_today
+                if file_name_today in file_names
+                else get_latest_inventory_file(file_names)
+            )
 
             if not target_file:
                 print(f"ERROR: No inventory file found in folder {folder_id}")
-                raise Exception(f"No inventory file found in Box folder {folder_id}")
+                raise Exception(f"No inventory file found in folder {folder_id}")
 
             file_content = download_file_from_box(target_file, folder_id, client)
             files_found.append((folder_id, target_file, file_content))
 
         except Exception as e:
-            print(
-                f"ERROR: Error retrieving inventory from folder {folder_id}: {str(e)}"
-            )
-            raise Exception(
-                "Error when trying to retrieve inventory reports. Please retry it later"
-            ) from e
+            print(f"ERROR retrieving inventory from folder {folder_id}: {str(e)}")
+            raise Exception("Error retrieving inventory reports.") from e
 
     for folder_id, target_file, file_content in files_found:
         csv_file = io.StringIO(file_content)
@@ -139,10 +129,8 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
         reader = csv.DictReader(csv_file)
 
         if not reader.fieldnames:
-            print(f"ERROR: CSV file from folder {folder_id} has no fieldnames/headers")
-            raise Exception(
-                "Error when trying to retrieve inventory reports. Please retry it later"
-            )
+            print(f"ERROR: CSV file from folder {folder_id} has no headers")
+            raise Exception("Invalid inventory CSV")
 
         reader.fieldnames = [name.strip() if name else "" for name in reader.fieldnames]
 
@@ -154,16 +142,13 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
 
             if not ips:
                 continue
-
             if org.lower() == "public-catalog":
                 continue
 
             for ip in ips.split():
-                ip_cleaned = ip.strip()
-                if ip_cleaned:
-                    vm_inventory.append(
-                        {"IP": ip_cleaned, "vCD": vcd, "Org": org, "Name": name}
-                    )
+                vm_inventory.append(
+                    {"IP": ip.strip(), "vCD": vcd, "Org": org, "Name": name}
+                )
 
     return vm_inventory
 
@@ -194,6 +179,28 @@ def list_all_hosts_for_reconciliation(
     ]
 
 
+# ---------- AUTO REGISTER MAPPING ----------
+def convert_vm_to_register_payload(vm: Dict) -> Dict:
+    """Create minimal acceptable payload for register_hosts()."""
+    ip = vm.get("ip_address")
+    name = vm.get("Name") or "auto-host"
+
+    fqdn = f"{name}.local"
+
+    return {
+        "ip_address": ip,
+        "fqdn": fqdn,
+        "environment": "Test",
+        "platform": "Linux",
+        "datacenter": "TOK05",
+        "serial_number": f"AUTO-{ip.replace('.', '-')}",
+        "host_type": "VCFaaS",
+        "workload_domain": vm.get("vCD") or "",
+        "vcd_org": vm.get("Org") or "",
+    }
+
+
+# ---------- MAIN RECONCILIATION ----------
 def perform_inventory_reconciliation(
     db_session: Session, offering: Optional[str] = None
 ) -> Dict:
@@ -203,10 +210,7 @@ def perform_inventory_reconciliation(
         print(f"ERROR: Error retrieving VMCA hosts: {str(e)}")
         return {
             "statusCode": 500,
-            "body": {
-                "status": "error",
-                "message": f"Error retrieving VMCA hosts: {str(e)}",
-            },
+            "body": {"status": "error", "message": f"Error retrieving VMCA hosts: {str(e)}"},
         }
 
     try:
@@ -216,23 +220,16 @@ def perform_inventory_reconciliation(
     except BoxAuthenticationError as e:
         return {
             "statusCode": 401,
-            "body": {
-                "status": "error",
-                "message": f"Box authentication failed: {str(e)}",
-            },
+            "body": {"status": "error", "message": f"Box authentication failed: {str(e)}"},
         }
     except Exception as e:
-        print(f"ERROR: Error reading VM inventory from Box: {str(e)}")
+        print(f"ERROR reading VM inventory: {str(e)}")
         return {
             "statusCode": 500,
-            "body": {
-                "status": "error",
-                "message": "Error when trying to retrieve inventory reports. Please retry it later",
-            },
+            "body": {"status": "error", "message": "Error retrieving inventory reports"},
         }
 
     vmca_by_ip = {host.get("ip_address"): host for host in vmca_hosts}
-
     vm_by_ip = {}
     duplicates = []
 
@@ -240,12 +237,11 @@ def perform_inventory_reconciliation(
         ip = vm.get("IP")
         if not ip:
             continue
-
         if ip in vm_by_ip:
             existing_vm = vm_by_ip[ip]
-            if existing_vm.get("vCD") != vm.get("vCD") or existing_vm.get(
+            if existing_vm.get("vCD") != vm.get("vCD") or existing_vm.get("Org") != vm.get(
                 "Org"
-            ) != vm.get("Org"):
+            ):
                 duplicates.append(
                     {
                         "ip_address": ip,
@@ -310,16 +306,26 @@ def perform_inventory_reconciliation(
                 }
             )
 
+    # Identify missing hosts (present in inventory but not in VMCA DB)
     for ip, vm in vm_by_ip.items():
         if ip not in vmca_by_ip:
-            missing_in_vmca.append(
-                {
-                    "ip_address": ip,
-                    "vCD": vm.get("vCD"),
-                    "Org": vm.get("Org"),
-                    "Name": vm.get("Name"),
-                }
-            )
+            vm_record = {
+                "ip_address": ip,
+                "vCD": vm.get("vCD"),
+                "Org": vm.get("Org"),
+                "Name": vm.get("Name"),
+            }
+            missing_in_vmca.append(vm_record)
+
+    # ---- AUTO REGISTER ----
+    auto_registered = []
+    for vm in missing_in_vmca:
+        try:
+            payload = [convert_vm_to_register_payload(vm)]
+            result = register_hosts(payload, db_session, user="auto")
+            auto_registered.append({"host": vm, "result": result})
+        except Exception as e:
+            auto_registered.append({"host": vm, "error": str(e)})
 
     return {
         "statusCode": 200,
@@ -335,29 +341,16 @@ def perform_inventory_reconciliation(
             },
             "offerings": {
                 "VCFaaS": {
-                    "matched_hosts": {
-                        "description": "Hosts that are registered in VMCA and found in VM inventory with matching workload_domain and Org",
-                        "hosts": matched_hosts,
-                    },
-                    "missing_in_vmca": {
-                        "description": "Found in VM inventory but not registered in VMCA",
-                        "hosts": missing_in_vmca,
-                    },
-                    "not_deployed": {
-                        "description": "Host registered in VMCA but not found in VM inventory report",
-                        "hosts": not_deployed,
-                    },
-                    "duplicates": {
-                        "description": "Hosts with matching IP but mismatched workload_domain, vCD, or Org fields",
-                        "hosts": duplicates,
-                    },
+                    "matched_hosts": {"hosts": matched_hosts},
+                    "missing_in_vmca": {"hosts": missing_in_vmca},
+                    "not_deployed": {"hosts": not_deployed},
+                    "duplicates": {"hosts": duplicates},
                 }
             },
+            "auto_registered": auto_registered,
         },
     }
 
 
-def reconciliation_endpoint(
-    db_session: Session, offering: Optional[str] = None
-) -> Dict:
+def reconciliation_endpoint(db_session: Session, offering: Optional[str] = None) -> Dict:
     return perform_inventory_reconciliation(db_session, offering)
