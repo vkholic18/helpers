@@ -1,0 +1,13 @@
+left side require fields for registering host
+
+right side data we receive in csv from Inventory Reconciliation cmd/api
+
+ 
+
+requirement - all fields from left side should be present in right side csv file, in order to do automation to periodically register the missing VM daily
+
+ 
+To summarize, for the automation to synchronize VMs in CMDB, we need following data:
+
+Need data for VMs such as Host Name, DataCenter etc which is needed for registering the assets in CMDB
+CIDR Block ownership should be with the user who is registering these devices (Rohit Sasikumar do we have nay service ID which can be used here)
