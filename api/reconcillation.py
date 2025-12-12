@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import Dict, List, Optional
 from common.db import Host
 import openpyxl
-from register_hosts import register_hosts
+from api.v1.register_hosts import register_hosts
 # from box_sdk_gen import BoxClient, BoxCCGAuth, CCGConfig
 
 # BOX LOGIC COMMENTED OUT - NOW USING EXCEL INSTEAD
@@ -176,8 +176,20 @@ def get_vm_inventory_from_excel(excel_file_path: str = "inventory_data.xlsx") ->
     Returns list of dictionaries with VM inventory data.
     """
     try:
-        if not os.path.exists(excel_file_path):
-            raise InventoryFileNotFoundError(f"Excel file not found: {excel_file_path}")
+        # Try to get the absolute path relative to this file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        full_path = os.path.join(current_dir, excel_file_path)
+        
+        # Check if file exists in current directory or use provided path
+        if os.path.exists(full_path):
+            excel_file_path = full_path
+        elif not os.path.exists(excel_file_path):
+            # List files in current directory for debugging
+            files_in_dir = os.listdir(current_dir) if os.path.exists(current_dir) else []
+            raise InventoryFileNotFoundError(
+                f"Excel file not found. Looked in: {excel_file_path} and {full_path}. "
+                f"Current dir: {current_dir}. Files available: {files_in_dir}"
+            )
         
         wb = openpyxl.load_workbook(excel_file_path)
         ws = wb.active
@@ -273,14 +285,19 @@ def perform_inventory_reconciliation(
     try:
         vm_inventory = get_vm_inventory_from_excel(excel_file_path)
     except InventoryFileNotFoundError as e:
-        return {"statusCode": 404, "body": {"status": "error", "message": str(e)}}
+        return {
+            "statusCode": 404, 
+            "body": {
+                "status": "error", 
+                "message": f"Excel file not found: {excel_file_path}. Please ensure the file is uploaded to the serverless function."
+            }
+        }
     except Exception as e:
-        print(f"ERROR: Error reading VM inventory from Excel: {str(e)}")
         return {
             "statusCode": 500,
             "body": {
                 "status": "error",
-                "message": "Error when trying to retrieve inventory from Excel file. Please retry it later",
+                "message": f"Error reading Excel file: {str(e)}",
             },
         }
 
