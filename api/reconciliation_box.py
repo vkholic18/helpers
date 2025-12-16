@@ -68,24 +68,21 @@ def get_latest_inventory_file(file_names: List[str]) -> Optional[str]:
 
 def download_file_from_box(file_name: str, folder_id: str, client: BoxClient) -> str:
     try:
-        folder = client.folders.get_folder_items(folder_id=folder_id)
-        if folder is None:
-            raise InventoryFileNotFoundError(
-                f"Folder with ID {folder_id} does not exist"
-            )
-        items = folder.entries
-        for item in items:
-            if item.name == file_name:
+        items = client.folders.get_folder_items(folder_id, limit=1000)
+
+        for item in items.entries:
+            if item.type == "file" and item.name == file_name:
                 file = client.downloads.download_file(item.id)
-                content = file.read().decode("utf-8")
-                return content
+                return file.read().decode("utf-8")
+
         raise InventoryFileNotFoundError(
             f'File "{file_name}" not found in folder {folder_id}'
         )
+
     except InventoryFileNotFoundError:
         raise
     except Exception as e:
-        raise Exception(f"Error downloading file {file_name}: {str(e)}") from e
+        raise RuntimeError(f"Error downloading file {file_name}") from e
 
 
 def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
@@ -138,9 +135,8 @@ def get_vm_inventory_from_box(offering: Optional[str] = None) -> List[Dict]:
         reader = csv.DictReader(csv_file)
 
         if not reader.fieldnames:
-            print(f"ERROR: CSV file from folder {folder_id} has no fieldnames/headers")
-            raise Exception(
-                "Error when trying to retrieve inventory reports. Please retry it later"
+            raise RuntimeError(
+                f"CSV file '{target_file}' from folder {folder_id} has no headers"
             )
 
         reader.fieldnames = [name.strip() if name else "" for name in reader.fieldnames]
