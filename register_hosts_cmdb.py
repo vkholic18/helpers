@@ -71,28 +71,56 @@ def extract_hosts(data, user):
 
 
 def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
+    # 1. Validate input
     error = validate_input(data)
     if error:
-        return {"statusCode": 400, "body": {"status": "error", "message": error}}
+        return {
+            "statusCode": 400,
+            "body": {"status": "error", "message": error},
+        }
 
+    # 2. Limit check
     if len(data) > 100:
         return {
             "statusCode": 413,
             "body": {"status": "error", "message": "Max 100 hosts allowed"},
         }
 
+    # 3. Prepare CMDB payload
     hosts, error = extract_hosts(data, user)
     if error:
-        return {"statusCode": 400, "body": {"status": "error", "message": error}}
+        return {
+            "statusCode": 400,
+            "body": {"status": "error", "message": error},
+        }
 
+    # 4. Upload to CMDB
     try:
-        CMDBClient().upload_ips_to_cmdb_inventory(hosts)
+        response = CMDBClient().upload_ips_to_cmdb_inventory(hosts)
     except Exception as e:
         return {
             "statusCode": 500,
-            "body": {"status": "error", "message": f"CMDB upload failed: {e}"},
+            "body": {
+                "status": "error",
+                "message": f"CMDB upload failed: {str(e)}",
+            },
         }
 
+    # 5. CMDB confirmation handling (NO LOGS, ONLY RETURNS)
+    # CMDB client may return None / {} on success
+    if response is not None:
+        if isinstance(response, dict):
+            status = response.get("status")
+            if status and status.lower() not in ("success", "ok", "created"):
+                return {
+                    "statusCode": 500,
+                    "body": {
+                        "status": "error",
+                        "message": f"CMDB did not confirm host creation: {response}",
+                    },
+                }
+
+    # 6. Success
     return {
         "statusCode": 200,
         "body": {
