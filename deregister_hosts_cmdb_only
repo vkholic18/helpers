@@ -1,48 +1,32 @@
-
 from typing import List, Dict
-import ipaddress
 from common.cmdb_client import CMDBClient
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-REQUIRED_FIELDS = ["ip", "hostname", "serial_number"]
+# CMDB identifies servers ONLY by serial number
+REQUIRED_FIELDS = ["serial_number"]
 
 
 def validate_input(data) -> str | None:
     for item in data:
-        for field in REQUIRED_FIELDS:
-            if field not in item:
-                return f"Missing required field: {field} in item: {item}"
+        if "serial_number" not in item:
+            return f"Missing required field: serial_number in item: {item}"
 
-            value = item[field]
-            if not isinstance(value, str) or not value.strip():
-                return f"Empty or invalid value for field: {field} in item: {item}"
-
-        try:
-            ipaddress.ip_address(item["ip"])
-        except ValueError:
-            return f"Invalid IP address format: {item['ip']}"
+        serial = item["serial_number"]
+        if not isinstance(serial, str) or not serial.strip():
+            return f"Empty or invalid serial_number in item: {item}"
 
     return None
 
 
 def extract_hosts(data: List[Dict]) -> List[Dict]:
     """
-    Prepare CMDB payload.
+    Prepare CMDB graveyard payload.
+    CMDB requires ONLY serial_number.
     """
-    hosts = []
-    for item in data:
-        fqdn = item["hostname"]
-        hostname = fqdn.split(".", 1)[0]
-
-        hosts.append(
-            {
-                "ip": item["ip"],
-                "hostname": hostname,
-                "serial_number": item["serial_number"],
-            }
-        )
-
-    return hosts
+    return [
+        {"serial_number": item["serial_number"]}
+        for item in data
+    ]
 
 
 def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
@@ -51,7 +35,10 @@ def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
     # 1. Validate input
     error_msg = validate_input(data)
     if error_msg:
-        return {"statusCode": 400, "body": {"status": "error", "message": error_msg}}
+        return {
+            "statusCode": 400,
+            "body": {"status": "error", "message": error_msg},
+        }
 
     # 2. Limit check
     if len(data) > 100:
@@ -66,20 +53,20 @@ def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
     # 3. Prepare CMDB payload
     extracted_hosts = extract_hosts(data)
 
-    # 4. Remove from CMDB only
+    # 4. Graveyard hosts in CMDB
     batch_size = 25
     max_workers = 2
-    futures = []
 
     try:
         cmdb_client = CMDBClient()
-
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for i in range(0, len(extracted_hosts), batch_size):
-                batch = extracted_hosts[i : i + batch_size]
-                futures.append(
-                    executor.submit(cmdb_client.remove_hosts_from_cmdb, batch)
+            futures = [
+                executor.submit(
+                    cmdb_client.remove_hosts_from_cmdb,
+                    extracted_hosts[i : i + batch_size],
                 )
+                for i in range(0, len(extracted_hosts), batch_size)
+            ]
 
             for future in as_completed(futures):
                 future.result()
@@ -99,6 +86,6 @@ def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
         "statusCode": 200,
         "body": {
             "status": "success",
-            "message": f"{len(extracted_hosts)} host(s) removed from CMDB successfully.",
+            "message": f"{len(extracted_hosts)} host(s) graveyarded in CMDB successfully.",
         },
     }
