@@ -50,11 +50,14 @@ def extract_hosts(data, user):
                 return None, f"Invalid datacenter: {datacenter}"
             datacenter = IBM_CLOUD_ZONES_MAP[zone]["datacenter"]
 
+        # 🔥 IMPORTANT: make hostname globally unique for CMDB reconciliation
+        unique_hostname = f"{hostname}.{domain}" if domain else hostname
+
         hosts.append(
             {
                 "ip": item["ip_address"],
                 "fqdn": fqdn,
-                "hostname": hostname,
+                "hostname": unique_hostname,   # <-- FIX APPLIED HERE
                 "domain": domain,
                 "platform": item["platform"],
                 "environment": item["environment"],
@@ -106,19 +109,18 @@ def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
             },
         }
 
-    # 5. CMDB confirmation handling (NO LOGS, ONLY RETURNS)
-    # CMDB client may return None / {} on success
-    if response is not None:
-        if isinstance(response, dict):
-            status = response.get("status")
-            if status and status.lower() not in ("success", "ok", "created"):
-                return {
-                    "statusCode": 500,
-                    "body": {
-                        "status": "error",
-                        "message": f"CMDB did not confirm host creation: {response}",
-                    },
-                }
+    # 5. Defensive CMDB response handling
+    # CMDB may return None / {} / success response
+    if response is not None and isinstance(response, dict):
+        status = response.get("status")
+        if status and status.lower() not in ("success", "ok", "created"):
+            return {
+                "statusCode": 500,
+                "body": {
+                    "status": "error",
+                    "message": f"CMDB did not confirm host creation: {response}",
+                },
+            }
 
     # 6. Success
     return {
