@@ -2,18 +2,19 @@ from typing import List, Dict
 from common.cmdb_client import CMDBClient
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# CMDB identifies servers ONLY by serial number
-REQUIRED_FIELDS = ["serial_number"]
+# CMDB graveyard API requires hostname + serial_number
+REQUIRED_FIELDS = ["serial_number", "hostname"]
 
 
 def validate_input(data) -> str | None:
     for item in data:
-        if "serial_number" not in item:
-            return f"Missing required field: serial_number in item: {item}"
+        for field in REQUIRED_FIELDS:
+            if field not in item:
+                return f"Missing required field: {field} in item: {item}"
 
-        serial = item["serial_number"]
-        if not isinstance(serial, str) or not serial.strip():
-            return f"Empty or invalid serial_number in item: {item}"
+            value = item[field]
+            if not isinstance(value, str) or not value.strip():
+                return f"Empty or invalid value for field: {field} in item: {item}"
 
     return None
 
@@ -21,12 +22,21 @@ def validate_input(data) -> str | None:
 def extract_hosts(data: List[Dict]) -> List[Dict]:
     """
     Prepare CMDB graveyard payload.
-    CMDB requires ONLY serial_number.
+    CMDB client requires hostname and serial_number.
     """
-    return [
-        {"serial_number": item["serial_number"]}
-        for item in data
-    ]
+    hosts = []
+
+    for item in data:
+        hostname = item["hostname"].split(".", 1)[0]
+
+        hosts.append(
+            {
+                "hostname": hostname,
+                "serial_number": item["serial_number"],
+            }
+        )
+
+    return hosts
 
 
 def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
@@ -59,6 +69,7 @@ def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
 
     try:
         cmdb_client = CMDBClient()
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
