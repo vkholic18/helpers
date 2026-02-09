@@ -11,7 +11,6 @@ REQUIRED_FIELDS = [
     "platform",
     "datacenter",
     "serial_number",
-    "host_type",
 ]
 
 ALLOWED_HOST_TYPES = {"VCFaaS", "VCS", "VCFforVPC", "Other"}
@@ -28,18 +27,18 @@ def validate_input(data):
         except ValueError:
             return f"Invalid IP address: {item['ip_address']}"
 
-        if item["host_type"] not in ALLOWED_HOST_TYPES:
-            return f"Invalid host_type: {item['host_type']}"
+        # host_type OPTIONAL
+        host_type = item.get("host_type", "Other")
 
-        if item["host_type"] == "VCFaaS":
-            if not item.get("workload_domain") or not item.get("vcd_org"):
-                return "workload_domain and vcd_org are required for VCFaaS"
+        if host_type not in ALLOWED_HOST_TYPES:
+            return f"Invalid host_type: {host_type}"
 
     return None
 
 
 def extract_hosts(data, user):
     hosts = []
+
     for item in data:
         fqdn = item["fqdn"]
         hostname, domain = (fqdn.split(".", 1) + [""])[:2]
@@ -51,7 +50,6 @@ def extract_hosts(data, user):
                 return None, f"Invalid datacenter: {datacenter}"
             datacenter = IBM_CLOUD_ZONES_MAP[zone]["datacenter"]
 
-        # 🔥 IMPORTANT: make hostname globally unique for CMDB reconciliation
         unique_hostname = f"{hostname}.{domain}" if domain else hostname
 
         hosts.append(
@@ -59,32 +57,27 @@ def extract_hosts(data, user):
                 "ip": item["ip_address"],
                 "fqdn": fqdn,
                 "hostname": unique_hostname,
-                "domain": domain,
+                "domain": item["domain"],
                 "platform": item["platform"],
                 "environment": item["environment"],
                 "datacenter": datacenter,
                 "serial_number": item["serial_number"],
-                "host_type": item["host_type"],
-                "workload_domain": item.get("workload_domain"),
-                "vcd_org": item.get("vcd_org"),
-                "c_code": item["c-code"],
+                "host_type": item.get("host_type", "Other"),
+                "c_code": item["c_code"],
 
-                # 🔹 TAGS / SOS FIELDS
-                "business_unit": item["business_unit"],
-                "system_admin": item["system_admin"],
-                "owned_by": item["owned_by"],
-                "additional_owner": item["additional_owner"],
-                "emergency_contacts": item["emergency_contacts"],
-                "role": item["role"],
-                "app_name": item["app_name"],
+                "business_unit": item.get("business_unit", ""),
+                "system_admin": item.get("system_admin", ""),
+                "owned_by": item.get("owned_by", ""),
+                "additional_owners": item.get("additional_owner", ""),
+                "emergency_contacts": item.get("emergency_contacts", ""),
+                "role": item.get("role", ""),
+                "app_name": item.get("app_name", ""),
 
-                # 🔹 EXCLUDE FLAGS  FROM CLI
                 "u_exclude_patching": item.get("u_exclude_patching", False),
                 "u_exclude_anti_virus": item.get("u_exclude_anti_virus", False),
-                "u_exclude_heath_checks": item.get("u_exclude_heath_checks", False),
+                "u_exclude_health_checks": item.get("u_exclude_health_checks", False),
                 "u_exclude_log_collections": item.get("u_exclude_log_collections", False),
                 "u_exclude_reason": item.get("u_exclude_reason", ""),
-
             }
         )
 
@@ -92,7 +85,6 @@ def extract_hosts(data, user):
 
 
 def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
-    # 1. Validate input
     error = validate_input(data)
     if error:
         return {
@@ -100,14 +92,12 @@ def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
             "body": {"status": "error", "message": error},
         }
 
-    # 2. Limit check
     if len(data) > 100:
         return {
             "statusCode": 413,
             "body": {"status": "error", "message": "Max 100 hosts allowed"},
         }
 
-    # 3. Prepare CMDB payload
     hosts, error = extract_hosts(data, user)
     if error:
         return {
@@ -115,7 +105,6 @@ def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
             "body": {"status": "error", "message": error},
         }
 
-    # 4. Upload to CMDB
     try:
         response = CMDBClient().upload_ips_to_cmdb_inventory(hosts)
     except Exception as e:
@@ -127,9 +116,7 @@ def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
             },
         }
 
-    # 5. Defensive CMDB response handling
-    # CMDB may return None / {} / success response
-    if response is not None and isinstance(response, dict):
+    if response and isinstance(response, dict):
         status = response.get("status")
         if status and status.lower() not in ("success", "ok", "created"):
             return {
@@ -140,7 +127,6 @@ def register_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
                 },
             }
 
-    # 6. Success
     return {
         "statusCode": 200,
         "body": {
