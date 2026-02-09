@@ -27,12 +27,13 @@ def extract_hosts(data: List[Dict]) -> List[Dict]:
     hosts = []
 
     for item in data:
-        hostname = item["hostname"].split(".", 1)[0]
+        hostname = item["hostname"]
 
         hosts.append(
             {
                 "hostname": hostname,
                 "serial_number": item["serial_number"],
+                "c_code": item["c_code"]
             }
         )
 
@@ -80,7 +81,13 @@ def deregister_hosts_cmdb_only(data: List[Dict], user: str) -> dict:
             ]
 
             for future in as_completed(futures):
-                future.result()
+                response = future.result()
+                if response is not None and isinstance(response, dict):
+                    status = response.get("status")
+                    if status and status.lower() not in ("success", "ok", "created"):
+                        raise RuntimeError(
+                            f"CMDB did not confirm  host graveyard: {response}"
+                        )
 
     except Exception as e:
         print(f"[ERROR] CMDB deregistration failed: {str(e)}")
