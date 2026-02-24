@@ -4,6 +4,7 @@ import json
 import os
 from typing import Optional
 import time
+import traceback
 
 IC4VMWS_UC_CODE = "ic4vmws"
 DECOMMISION_REASON = "Graveyarding the VM"
@@ -39,46 +40,49 @@ class CMDBClient:
     ) -> List[Dict[str, Any]]:
         """This will fetch the servers in the CMDB database
         
-        Uses offset-based pagination matching ServiceNow API standards.
+        Returns list of records on success, raises exception with debug info on error
         """
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
         }
 
-        # Use provided c_code or fallback to default
+        # Use provided c_code or fallback
         effective_c_code = c_code or IC4VMWS_UC_CODE
-        
-        # Build the query string exactly as in working curl
-        query_parts = [f"u_c_code={effective_c_code}", "u_dcim_status=Live"]
-        
+        base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
+
         if hostname:
-            query_parts.append(f"name={hostname}")
+            base_query += f"^name={hostname}"
         if serial_number:
-            query_parts.append(f"serial_number={serial_number}")
-        
-        query_string = "^".join(query_parts)
+            base_query += f"^serial_number={serial_number}"
 
         all_records = []
-        offset = 0
         limit = 1000
-        max_retries = 5
-        backoff_factor = 2
+        page = 1
+        last_sys_id = ""
+        debug_info = {
+            "requests_made": [],
+            "errors": [],
+            "c_code": effective_c_code,
+        }
 
         while True:
-            # Exact parameter structure from working curl
+            query = f"{base_query}^ORDERBYsys_id"
+
+            if last_sys_id:
+                query += f"^sys_id>{last_sys_id}"
+
             params = {
-                "sysparm_table": "cmdb_ci_server",
-                "sysparm_start": offset,
-                "sysparm_limit": limit,
-                "sysparm_query": query_string
+                "sysparm_query": query,
+                "sysparm_limit": str(limit),
+                "sysparm_table": "cmdb_ci_server"
             }
-            
-            print(f"[INFO] Fetching records with offset={offset}, query={query_string}")
-            
+
+            max_retries = 5
+            backoff_factor = 2
             retries = 0
+
             while retries < max_retries:
                 try:
                     response = requests.get(
@@ -87,72 +91,91 @@ class CMDBClient:
                         params=params,
                         timeout=60,
                     )
-
-                    # Handle rate limiting
+                    
+                    # Capture request details
+                    request_info = {
+                        "page": page,
+                        "url": response.url,
+                        "status_code": response.status_code,
+                        "query": query,
+                        "params": params,
+                        "response_headers": dict(response.headers),
+                        "response_body_preview": response.text[:500]
+                    }
+                    
+                    debug_info["requests_made"].append(request_info)
+                    
+                    # If we get 416, raise exception with full debug details
+                    if response.status_code == 416:
+                        error_msg = f"416 Range Not Satisfiable for c_code={effective_c_code}"
+                        debug_data = {
+                            "debug_info": debug_info,
+                            "response_text": response.text[:1000],
+                            "records_fetched_before_error": len(all_records),
+                            "url": response.url,
+                            "status_code": 416
+                        }
+                        raise requests.HTTPError(
+                            f"{error_msg}\nDebug: {json.dumps(debug_data, indent=2)}"
+                        )
+                    
                     if response.status_code == 429:
                         retry_after = int(
                             response.headers.get("Retry-After", backoff_factor**retries)
                         )
-                        print(f"[Warning] Rate limited (429). Retrying in {retry_after} seconds...")
                         time.sleep(retry_after)
                         retries += 1
                         continue
 
-                    # Log and raise on 416 errors with details
-                    if response.status_code == 416:
-                        print(f"[ERROR] 416 Range Not Satisfiable")
-                        print(f"[ERROR] URL: {response.url}")
-                        print(f"[ERROR] Params: {params}")
-                        print(f"[ERROR] Response: {response.text[:500]}")
-                        response.raise_for_status()
-                    
-                    # Raise exception for other HTTP errors
                     response.raise_for_status()
-                    
-                    # Parse JSON response
                     data = response.json()
 
-                    # Extract records from response
                     records = data.get("result", [])
-                    
-                    # If no records returned, we've fetched everything
                     if not records:
-                        print(f"[INFO] No more records. Total fetched: {len(all_records)}")
                         return all_records
 
-                    # Add records to our collection
                     all_records.extend(records)
-                    print(f"[INFO] Fetched {len(records)} records at offset {offset} (Total: {len(all_records)})")
+                    last_sys_id = records[-1]["sys_id"]
 
-                    # If we got fewer records than the limit, we're done
                     if len(records) < limit:
-                        print(f"[INFO] Fetching complete. Total records: {len(all_records)}")
                         return all_records
 
-                    # Move to next page
-                    offset += limit
+                    page += 1
                     break
-
+                    
                 except requests.RequestException as e:
+                    error_info = {
+                        "page": page,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                        "params": params
+                    }
+                    debug_info["errors"].append(error_info)
+                    
                     wait_time = backoff_factor**retries
-                    print(
-                        f"[Error] Request failed: {e}"
-                        f"\n  URL: {self.CMDB_GETCI_PROD_API_URL}"
-                        f"\n  Params: {params}"
-                        f"\n  Retrying in {wait_time} seconds..."
-                    )
                     time.sleep(wait_time)
                     retries += 1
                     
                 except ValueError as e:
-                    print(f"[ERROR] Invalid JSON response: {e}")
+                    debug_data = {
+                        "debug_info": debug_info,
+                        "records_fetched_before_error": len(all_records)
+                    }
                     raise ValueError(
-                        f"Invalid JSON response from {self.CMDB_GETCI_PROD_API_URL}"
+                        f"Invalid JSON response: {str(e)}\nDebug: {json.dumps(debug_data, indent=2)}"
                     )
             else:
-                # Exhausted all retries
-                print(f"[ERROR] Failed after {max_retries} retries. Returning {len(all_records)} records.")
-                return all_records
+                # Max retries exhausted
+                debug_data = {
+                    "debug_info": debug_info,
+                    "records_fetched": len(all_records)
+                }
+                raise RuntimeError(
+                    f"Failed after {max_retries} retries\nDebug: {json.dumps(debug_data, indent=2)}"
+                )
+
+    # EVERYTHING BELOW IS UNCHANGED
 
     def upload_ips_to_cmdb_inventory(
         self, ips_list: List[Dict[str, Any]]
