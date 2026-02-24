@@ -33,7 +33,13 @@ class CMDBClient:
         c_code: Optional[str] = None,
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 500,
     ) -> List[Dict[str, Any]]:
+        """
+        Fetch paginated server records from CMDB.
+        Serverless-safe: returns only one page.
+        """
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
@@ -48,70 +54,24 @@ class CMDBClient:
         if serial_number:
             base_query += f"^serial_number={serial_number}"
 
-        all_records = []
-        limit = 1000
-        offset = 0
+        params = {
+            "sysparm_query": base_query,
+            "sysparm_limit": limit,
+            "sysparm_offset": offset,
+            "sysparm_table": "cmdb_ci_server",
+        }
 
-        max_retries = 5
-        backoff_factor = 2
+        response = requests.get(
+            self.CMDB_GETCI_PROD_API_URL,
+            headers=headers,
+            params=params,
+            timeout=60,
+        )
 
-        while True:
-            params = {
-                "sysparm_query": base_query,
-                "sysparm_limit": limit,
-                "sysparm_offset": offset,
-                "sysparm_table": "cmdb_ci_server",
-            }
+        response.raise_for_status()
+        data = response.json()
 
-            retries = 0
-            while retries < max_retries:
-                try:
-                    response = requests.get(
-                        self.CMDB_GETCI_PROD_API_URL,
-                        headers=headers,
-                        params=params,
-                        timeout=60,
-                    )
-
-                    if response.status_code == 429:
-                        retry_after = int(
-                            response.headers.get(
-                                "Retry-After", backoff_factor**retries
-                            )
-                        )
-                        time.sleep(retry_after)
-                        retries += 1
-                        continue
-
-                    response.raise_for_status()
-                    data = response.json()
-
-                    records = data.get("result", [])
-                    if not records:
-                        return all_records
-
-                    all_records.extend(records)
-
-                    if len(records) < limit:
-                        return all_records
-
-                    offset += limit
-                    break
-
-                except requests.RequestException as e:
-                    wait_time = backoff_factor**retries
-                    time.sleep(wait_time)
-                    retries += 1
-
-                except ValueError:
-                    raise ValueError(
-                        f"Invalid JSON response from {self.CMDB_GETCI_PROD_API_URL}"
-                    )
-
-            else:
-                return all_records
-
-    # Everything below unchanged
+        return data.get("result", [])
 
     def upload_ips_to_cmdb_inventory(
         self, ips_list: List[Dict[str, Any]]
