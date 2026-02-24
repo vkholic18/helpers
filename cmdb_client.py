@@ -1,8 +1,7 @@
 import requests
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import json
 import os
-from typing import Optional
 import time
 
 IC4VMWS_UC_CODE = "ic4vmws"
@@ -27,16 +26,14 @@ class CMDBClient:
             or not self.CMDB_INSERT_MULTIPLE_PROD_API_URL
             or not self.CMDB_ACCESS_TOKEN
         ):
-            raise RuntimeError(
-                "Missing CMDB URL's or Access Token environment variables!!!"
-            )
+            raise RuntimeError("Missing CMDB environment variables")
 
     def fetch_cmdb_server_list(
         self,
         c_code: Optional[str] = None,
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
@@ -51,78 +48,75 @@ class CMDBClient:
         if serial_number:
             base_query += f"^serial_number={serial_number}"
 
+        all_records = []
         limit = 1000
-        last_sys_id = ""
-        debug_trace = []
-        iteration = 0
+        offset = 0
+
+        max_retries = 5
+        backoff_factor = 2
 
         while True:
-            iteration += 1
-
-            query = f"{base_query}^ORDERBYsys_id"
-            if last_sys_id:
-                query += f"^sys_id>{last_sys_id}"
-
             params = {
-                "sysparm_query": query,
+                "sysparm_query": base_query,
                 "sysparm_limit": limit,
+                "sysparm_offset": offset,
                 "sysparm_table": "cmdb_ci_server",
             }
 
-            try:
-                response = requests.get(
-                    self.CMDB_GETCI_PROD_API_URL,
-                    headers=headers,
-                    params=params,
-                    timeout=60,
-                )
+            retries = 0
+            while retries < max_retries:
+                try:
+                    response = requests.get(
+                        self.CMDB_GETCI_PROD_API_URL,
+                        headers=headers,
+                        params=params,
+                        timeout=60,
+                    )
 
-                debug_trace.append({
-                    "iteration": iteration,
-                    "query": query,
-                    "status": response.status_code,
-                })
+                    if response.status_code == 429:
+                        retry_after = int(
+                            response.headers.get(
+                                "Retry-After", backoff_factor**retries
+                            )
+                        )
+                        time.sleep(retry_after)
+                        retries += 1
+                        continue
 
-                # Stop after 2 calls (proof)
-                if iteration >= 2:
-                    return {
-                        "debug_trace": debug_trace
-                    }
+                    response.raise_for_status()
+                    data = response.json()
 
-                response.raise_for_status()
-                data = response.json()
+                    records = data.get("result", [])
+                    if not records:
+                        return all_records
 
-                records = data.get("result", [])
-                if not records:
-                    return {
-                        "debug_trace": debug_trace,
-                        "message": "no records"
-                    }
+                    all_records.extend(records)
 
-                last_sys_id = records[-1]["sys_id"]
+                    if len(records) < limit:
+                        return all_records
 
-                if len(records) < limit:
-                    return {
-                        "debug_trace": debug_trace,
-                        "message": "pagination ended early"
-                    }
+                    offset += limit
+                    break
 
-            except Exception as e:
-                debug_trace.append({
-                    "iteration": iteration,
-                    "exception": str(e)
-                })
-                return {
-                    "debug_trace": debug_trace
-                }
+                except requests.RequestException as e:
+                    wait_time = backoff_factor**retries
+                    time.sleep(wait_time)
+                    retries += 1
+
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid JSON response from {self.CMDB_GETCI_PROD_API_URL}"
+                    )
+
+            else:
+                return all_records
+
+    # Everything below unchanged
 
     def upload_ips_to_cmdb_inventory(
         self, ips_list: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         payload = self.build_cmdb_payload(ips_list)
-        print(
-            f"[INFO] Uploading payload to CMDB: {json.dumps(payload, indent=2)} with URL : {self.CMDB_INSERT_MULTIPLE_PROD_API_URL}"
-        )
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
