@@ -31,7 +31,6 @@ class CMDBClient:
                 "Missing CMDB URL's or Access Token environment variables!!!"
             )
 
-    # 🔹 ONLY CHANGE: added optional c_code
     def fetch_cmdb_server_list(
         self,
         c_code: Optional[str] = None,
@@ -45,7 +44,7 @@ class CMDBClient:
             "Content-Type": "application/json",
         }
 
-        # 🔹 ONLY CHANGE: use provided c_code or fallback
+        # Use provided c_code or fallback to default
         effective_c_code = c_code or IC4VMWS_UC_CODE
         base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
 
@@ -65,12 +64,16 @@ class CMDBClient:
             if last_sys_id:
                 query += f"^sys_id>{last_sys_id}"
 
-            params = {"sysparm_query": query, "sysparm_limit": str(limit),"sysparm_table": "cmdb_ci_server"}
+            params = {
+                "sysparm_query": query,
+                "sysparm_limit": str(limit),
+                "sysparm_table": "cmdb_ci_server"
+            }
 
             max_retries = 5
             backoff_factor = 2
-
             retries = 0
+
             while retries < max_retries:
                 try:
                     response = requests.get(
@@ -79,14 +82,8 @@ class CMDBClient:
                         params=params,
                         timeout=60,
                     )
-                    return {
-                    "debug": True,
-                    "status": response.status_code,
-                    "final_url": response.url,
-                    "query": query,
-                    "params": params,
-                    "response_body": response.text[:1000]
-                    }
+
+                    # Handle rate limiting
                     if response.status_code == 429:
                         print(response.headers)
                         retry_after = int(
@@ -99,37 +96,53 @@ class CMDBClient:
                         retries += 1
                         continue
 
+                    # Raise exception for other HTTP errors
                     response.raise_for_status()
+                    
+                    # Parse JSON response
                     data = response.json()
 
+                    # Extract records from response
                     records = data.get("result", [])
+                    
+                    # If no records returned, we've fetched everything
                     if not records:
+                        print(f"[INFO] Fetched total of {len(all_records)} records for c_code={effective_c_code}")
                         return all_records
 
+                    # Add records to our collection
                     all_records.extend(records)
+                    print(f"[INFO] Page {page}: Fetched {len(records)} records (Total: {len(all_records)})")
+                    
+                    # Update last_sys_id for next page
                     last_sys_id = records[-1]["sys_id"]
 
+                    # If we got fewer records than the limit, we're done
                     if len(records) < limit:
+                        print(f"[INFO] Completed fetching. Total records: {len(all_records)}")
                         return all_records
 
+                    # Move to next page
                     page += 1
                     break
+
                 except requests.RequestException as e:
                     wait_time = backoff_factor**retries
                     print(
-                        f"Error {e} fetching CMDB records for api_url: {self.CMDB_GETCI_PROD_API_URL} and params: {params}, Retrying in {wait_time} seconds.."
+                        f"[Error] {e} fetching CMDB records for api_url: {self.CMDB_GETCI_PROD_API_URL} "
+                        f"and params: {params}, Retrying in {wait_time} seconds..."
                     )
                     time.sleep(wait_time)
                     retries += 1
-                except ValueError:
+                    
+                except ValueError as e:
                     raise ValueError(
-                        f"Invalid JSON response from api_url: {self.CMDB_GETCI_PROD_API_URL}"
+                        f"Invalid JSON response from api_url: {self.CMDB_GETCI_PROD_API_URL}. Error: {e}"
                     )
             else:
-                print(f"[Error] Failed after {max_retries}. Giving up.")
+                # Exhausted all retries
+                print(f"[Error] Failed after {max_retries} retries. Returning {len(all_records)} records fetched so far.")
                 return all_records
-
-    # EVERYTHING BELOW IS UNCHANGED
 
     def upload_ips_to_cmdb_inventory(
         self, ips_list: List[Dict[str, Any]]
