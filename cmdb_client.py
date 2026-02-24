@@ -36,8 +36,7 @@ class CMDBClient:
         c_code: Optional[str] = None,
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """This will fetch the servers in the CMDB database"""
+    ) -> Dict[str, Any]:
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
@@ -52,162 +51,70 @@ class CMDBClient:
         if serial_number:
             base_query += f"^serial_number={serial_number}"
 
-        all_records = []
         limit = 1000
-        page = 1
         last_sys_id = ""
+        debug_trace = []
+        iteration = 0
 
         while True:
-            query = f"{base_query}^ORDERBYsys_id"
+            iteration += 1
 
+            query = f"{base_query}^ORDERBYsys_id"
             if last_sys_id:
                 query += f"^sys_id>{last_sys_id}"
 
-            params = {"sysparm_query": query, "sysparm_limit": str(limit), "sysparm_table": "cmdb_ci_server"}
+            params = {
+                "sysparm_query": query,
+                "sysparm_limit": limit,
+                "sysparm_table": "cmdb_ci_server",
+            }
 
-            # 🔍 DEBUG POINT 1: Check params before API call
-            # return {
-            #     "debug_point": "1_BEFORE_API_CALL",
-            #     "c_code": effective_c_code,
-            #     "page": page,
-            #     "query": query,
-            #     "params": params,
-            #     "url": self.CMDB_GETCI_PROD_API_URL
-            # }
+            try:
+                response = requests.get(
+                    self.CMDB_GETCI_PROD_API_URL,
+                    headers=headers,
+                    params=params,
+                    timeout=60,
+                )
 
-            max_retries = 5
-            backoff_factor = 2
+                debug_trace.append({
+                    "iteration": iteration,
+                    "query": query,
+                    "status": response.status_code,
+                })
 
-            retries = 0
-            while retries < max_retries:
-                try:
-                    response = requests.get(
-                        self.CMDB_GETCI_PROD_API_URL,
-                        headers=headers,
-                        params=params,
-                        timeout=60,
-                    )
-                    
-                    # 🔍 DEBUG POINT 2: Check response immediately after API call
-                    # return {
-                    #     "debug_point": "2_AFTER_API_CALL",
-                    #     "status_code": response.status_code,
-                    #     "final_url": response.url,
-                    #     "response_headers": dict(response.headers),
-                    #     "response_body_preview": response.text[:500]
-                    # }
-                    
-                    if response.status_code == 429:
-                        print(response.headers)
-                        retry_after = int(
-                            response.headers.get("Retry-After", backoff_factor**retries)
-                        )
-                        print(
-                            f"[Warning] Rate limited (429). Retrying in {retry_after} seconds..."
-                        )
-                        time.sleep(retry_after)
-                        retries += 1
-                        continue
+                # Stop after 2 calls (proof)
+                if iteration >= 2:
+                    return {
+                        "debug_trace": debug_trace
+                    }
 
-                    # 🔍 DEBUG POINT 3: Check before raise_for_status
-                    # return {
-                    #     "debug_point": "3_BEFORE_RAISE_FOR_STATUS",
-                    #     "status_code": response.status_code,
-                    #     "will_raise_error": response.status_code >= 400,
-                    #     "response_body": response.text[:500]
-                    # }
+                response.raise_for_status()
+                data = response.json()
 
-                    response.raise_for_status()
-                    
-                    # 🔍 DEBUG POINT 4: Check after raise_for_status (only reaches here if 2xx status)
-                    # return {
-                    #     "debug_point": "4_AFTER_RAISE_FOR_STATUS",
-                    #     "status_code": response.status_code,
-                    #     "message": "raise_for_status passed, about to parse JSON"
-                    # }
-                    
-                    data = response.json()
+                records = data.get("result", [])
+                if not records:
+                    return {
+                        "debug_trace": debug_trace,
+                        "message": "no records"
+                    }
 
-                    # 🔍 DEBUG POINT 5: Check after JSON parsing
-                    # return {
-                    #     "debug_point": "5_AFTER_JSON_PARSE",
-                    #     "data_keys": list(data.keys()),
-                    #     "result_count": len(data.get("result", [])),
-                    #     "total_count": data.get("count", "N/A")
-                    # }
+                last_sys_id = records[-1]["sys_id"]
 
-                    records = data.get("result", [])
-                    if not records:
-                        # 🔍 DEBUG POINT 6: Check when no records returned
-                        # return {
-                        #     "debug_point": "6_NO_RECORDS",
-                        #     "all_records_count": len(all_records),
-                        #     "message": "No more records, returning all_records"
-                        # }
-                        return all_records
+                if len(records) < limit:
+                    return {
+                        "debug_trace": debug_trace,
+                        "message": "pagination ended early"
+                    }
 
-                    all_records.extend(records)
-                    last_sys_id = records[-1]["sys_id"]
-
-                    # 🔍 DEBUG POINT 7: Check after adding records
-                    # return {
-                    #     "debug_point": "7_AFTER_ADDING_RECORDS",
-                    #     "records_in_this_page": len(records),
-                    #     "total_records_so_far": len(all_records),
-                    #     "last_sys_id": last_sys_id,
-                    #     "will_continue_pagination": len(records) >= limit
-                    # }
-
-                    if len(records) < limit:
-                        # 🔍 DEBUG POINT 8: Check when pagination completes
-                        # return {
-                        #     "debug_point": "8_PAGINATION_COMPLETE",
-                        #     "final_count": len(all_records),
-                        #     "message": "Last page reached, returning all_records"
-                        # }
-                        return all_records
-
-                    page += 1
-                    break
-                    
-                except requests.RequestException as e:
-                    # 🔍 DEBUG POINT 9: Check when exception occurs
-                    # return {
-                    #     "debug_point": "9_EXCEPTION_CAUGHT",
-                    #     "exception_type": type(e).__name__,
-                    #     "exception_message": str(e),
-                    #     "retry_attempt": retries + 1,
-                    #     "max_retries": max_retries
-                    # }
-                    
-                    wait_time = backoff_factor**retries
-                    print(
-                        f"Error {e} fetching CMDB records for api_url: {self.CMDB_GETCI_PROD_API_URL} and params: {params}, Retrying in {wait_time} seconds.."
-                    )
-                    time.sleep(wait_time)
-                    retries += 1
-                    
-                except ValueError:
-                    # 🔍 DEBUG POINT 10: Check when JSON parsing fails
-                    # return {
-                    #     "debug_point": "10_JSON_PARSE_ERROR",
-                    #     "response_text": response.text[:500],
-                    #     "message": "Failed to parse JSON"
-                    # }
-                    raise ValueError(
-                        f"Invalid JSON response from api_url: {self.CMDB_GETCI_PROD_API_URL}"
-                    )
-            else:
-                # 🔍 DEBUG POINT 11: Check when max retries exhausted
-                # return {
-                #     "debug_point": "11_MAX_RETRIES_EXHAUSTED",
-                #     "records_fetched_so_far": len(all_records),
-                #     "message": "Giving up after max retries"
-                # }
-                print(f"[Error] Failed after {max_retries}. Giving up.")
-                return all_records
-
-    # EVERYTHING BELOW IS UNCHANGED
+            except Exception as e:
+                debug_trace.append({
+                    "iteration": iteration,
+                    "exception": str(e)
+                })
+                return {
+                    "debug_trace": debug_trace
+                }
 
     def upload_ips_to_cmdb_inventory(
         self, ips_list: List[Dict[str, Any]]
