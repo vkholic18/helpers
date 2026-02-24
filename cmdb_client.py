@@ -37,39 +37,48 @@ class CMDBClient:
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """This will fetch the servers in the CMDB database"""
+        """This will fetch the servers in the CMDB database
+        
+        Uses offset-based pagination matching ServiceNow API standards.
+        """
 
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
 
         # Use provided c_code or fallback to default
         effective_c_code = c_code or IC4VMWS_UC_CODE
         
-        base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
-
+        # Build the query string exactly as in working curl
+        query_parts = [f"u_c_code={effective_c_code}", "u_dcim_status=Live"]
+        
         if hostname:
-            base_query += f"^name={hostname}"
+            query_parts.append(f"name={hostname}")
         if serial_number:
-            base_query += f"^serial_number={serial_number}"
+            query_parts.append(f"serial_number={serial_number}")
+        
+        query_string = "^".join(query_parts)
 
         all_records = []
-        limit = 1000
         offset = 0
+        limit = 1000
+        max_retries = 5
+        backoff_factor = 2
 
         while True:
+            # Exact parameter structure from working curl
             params = {
                 "sysparm_table": "cmdb_ci_server",
-                "sysparm_start": str(offset),
-                "sysparm_limit": str(limit),
-                "sysparm_query": base_query
+                "sysparm_start": offset,
+                "sysparm_limit": limit,
+                "sysparm_query": query_string
             }
-
-            max_retries = 5
-            backoff_factor = 2
+            
+            print(f"[INFO] Fetching records with offset={offset}, query={query_string}")
+            
             retries = 0
-
             while retries < max_retries:
                 try:
                     response = requests.get(
@@ -81,29 +90,21 @@ class CMDBClient:
 
                     # Handle rate limiting
                     if response.status_code == 429:
-                        print(response.headers)
                         retry_after = int(
                             response.headers.get("Retry-After", backoff_factor**retries)
                         )
-                        print(
-                            f"[Warning] Rate limited (429). Retrying in {retry_after} seconds..."
-                        )
+                        print(f"[Warning] Rate limited (429). Retrying in {retry_after} seconds...")
                         time.sleep(retry_after)
                         retries += 1
                         continue
 
-                    # Handle specific HTTP errors with detailed logging
+                    # Log and raise on 416 errors with details
                     if response.status_code == 416:
-                        error_detail = response.text[:500]
-                        print(f"[ERROR] 416 Range Not Satisfiable for c_code={effective_c_code}")
-                        print(f"[ERROR] Response: {error_detail}")
-                        print(f"[ERROR] Query: {query}")
+                        print(f"[ERROR] 416 Range Not Satisfiable")
                         print(f"[ERROR] URL: {response.url}")
-                        raise requests.HTTPError(
-                            f"416 error for c_code={effective_c_code}. "
-                            f"This may indicate: (1) invalid c_code, (2) API limit exceeded, "
-                            f"or (3) incorrect query parameters. Response: {error_detail}"
-                        )
+                        print(f"[ERROR] Params: {params}")
+                        print(f"[ERROR] Response: {response.text[:500]}")
+                        response.raise_for_status()
                     
                     # Raise exception for other HTTP errors
                     response.raise_for_status()
@@ -116,38 +117,41 @@ class CMDBClient:
                     
                     # If no records returned, we've fetched everything
                     if not records:
-                        print(f"[INFO] Fetched total of {len(all_records)} records for c_code={effective_c_code}")
+                        print(f"[INFO] No more records. Total fetched: {len(all_records)}")
                         return all_records
 
                     # Add records to our collection
                     all_records.extend(records)
-                    print(f"[INFO] Offset {offset}: Fetched {len(records)} records (Total: {len(all_records)})")
+                    print(f"[INFO] Fetched {len(records)} records at offset {offset} (Total: {len(all_records)})")
 
                     # If we got fewer records than the limit, we're done
                     if len(records) < limit:
-                        print(f"[INFO] Completed fetching. Total records: {len(all_records)}")
+                        print(f"[INFO] Fetching complete. Total records: {len(all_records)}")
                         return all_records
 
-                    # Move to next offset
+                    # Move to next page
                     offset += limit
                     break
 
                 except requests.RequestException as e:
                     wait_time = backoff_factor**retries
                     print(
-                        f"[Error] {e} fetching CMDB records for api_url: {self.CMDB_GETCI_PROD_API_URL} "
-                        f"and params: {params}, Retrying in {wait_time} seconds..."
+                        f"[Error] Request failed: {e}"
+                        f"\n  URL: {self.CMDB_GETCI_PROD_API_URL}"
+                        f"\n  Params: {params}"
+                        f"\n  Retrying in {wait_time} seconds..."
                     )
                     time.sleep(wait_time)
                     retries += 1
                     
                 except ValueError as e:
+                    print(f"[ERROR] Invalid JSON response: {e}")
                     raise ValueError(
-                        f"Invalid JSON response from api_url: {self.CMDB_GETCI_PROD_API_URL}. Error: {e}"
+                        f"Invalid JSON response from {self.CMDB_GETCI_PROD_API_URL}"
                     )
             else:
                 # Exhausted all retries
-                print(f"[Error] Failed after {max_retries} retries. Returning {len(all_records)} records fetched so far.")
+                print(f"[ERROR] Failed after {max_retries} retries. Returning {len(all_records)} records.")
                 return all_records
 
     def upload_ips_to_cmdb_inventory(
