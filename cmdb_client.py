@@ -46,6 +46,7 @@ class CMDBClient:
 
         # Use provided c_code or fallback to default
         effective_c_code = c_code or IC4VMWS_UC_CODE
+        
         base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
 
         if hostname:
@@ -55,19 +56,14 @@ class CMDBClient:
 
         all_records = []
         limit = 1000
-        page = 1
-        last_sys_id = ""
+        offset = 0
 
         while True:
-            query = f"{base_query}^ORDERBYsys_id"
-
-            if last_sys_id:
-                query += f"^sys_id>{last_sys_id}"
-
             params = {
-                "sysparm_query": query,
+                "sysparm_table": "cmdb_ci_server",
+                "sysparm_start": str(offset),
                 "sysparm_limit": str(limit),
-                "sysparm_table": "cmdb_ci_server"
+                "sysparm_query": base_query
             }
 
             max_retries = 5
@@ -96,6 +92,19 @@ class CMDBClient:
                         retries += 1
                         continue
 
+                    # Handle specific HTTP errors with detailed logging
+                    if response.status_code == 416:
+                        error_detail = response.text[:500]
+                        print(f"[ERROR] 416 Range Not Satisfiable for c_code={effective_c_code}")
+                        print(f"[ERROR] Response: {error_detail}")
+                        print(f"[ERROR] Query: {query}")
+                        print(f"[ERROR] URL: {response.url}")
+                        raise requests.HTTPError(
+                            f"416 error for c_code={effective_c_code}. "
+                            f"This may indicate: (1) invalid c_code, (2) API limit exceeded, "
+                            f"or (3) incorrect query parameters. Response: {error_detail}"
+                        )
+                    
                     # Raise exception for other HTTP errors
                     response.raise_for_status()
                     
@@ -112,18 +121,15 @@ class CMDBClient:
 
                     # Add records to our collection
                     all_records.extend(records)
-                    print(f"[INFO] Page {page}: Fetched {len(records)} records (Total: {len(all_records)})")
-                    
-                    # Update last_sys_id for next page
-                    last_sys_id = records[-1]["sys_id"]
+                    print(f"[INFO] Offset {offset}: Fetched {len(records)} records (Total: {len(all_records)})")
 
                     # If we got fewer records than the limit, we're done
                     if len(records) < limit:
                         print(f"[INFO] Completed fetching. Total records: {len(all_records)}")
                         return all_records
 
-                    # Move to next page
-                    page += 1
+                    # Move to next offset
+                    offset += limit
                     break
 
                 except requests.RequestException as e:
