@@ -41,13 +41,13 @@ class CMDBClient:
         """This will fetch the servers in the CMDB database"""
 
         headers = {
-            "Authorization": f"Bearer {self.CMDB_GETCI_PROD_API_URL}",
+            "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
             "Content-Type": "application/json",
         }
 
         # 🔹 ONLY CHANGE: use provided c_code or fallback
         effective_c_code = c_code or IC4VMWS_UC_CODE
-        base_query = f"u_c_code={effective_c_code}^u_dcim_status=Pre-live"
+        base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
 
         if hostname:
             base_query += f"^name={hostname}"
@@ -65,7 +65,7 @@ class CMDBClient:
             if last_sys_id:
                 query += f"^sys_id>{last_sys_id}"
 
-            params = {"sysparm_query": query, "sysparm_limit": str(limit)}
+            params = {"sysparm_query": query, "sysparm_limit": str(limit),"sysparm_table": "cmdb_ci_server"}
 
             max_retries = 5
             backoff_factor = 2
@@ -79,6 +79,14 @@ class CMDBClient:
                         params=params,
                         timeout=60,
                     )
+                    return {
+                    "debug": True,
+                    "status": response.status_code,
+                    "final_url": response.url,
+                    "query": query,
+                    "params": params,
+                    "response_body": response.text[:1000]
+                    }
                     if response.status_code == 429:
                         print(response.headers)
                         retry_after = int(
@@ -94,7 +102,7 @@ class CMDBClient:
                     response.raise_for_status()
                     data = response.json()
 
-                    records = data.get("result")
+                    records = data.get("result", [])
                     if not records:
                         return all_records
 
