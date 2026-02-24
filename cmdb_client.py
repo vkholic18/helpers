@@ -105,19 +105,17 @@ class CMDBClient:
                     
                     debug_info["requests_made"].append(request_info)
                     
-                    # If we get 416, raise exception with full debug details
+                    # If we get 416, raise exception with key debug details
                     if response.status_code == 416:
-                        error_msg = f"416 Range Not Satisfiable for c_code={effective_c_code}"
-                        debug_data = {
-                            "debug_info": debug_info,
-                            "response_text": response.text[:1000],
-                            "records_fetched_before_error": len(all_records),
-                            "url": response.url,
-                            "status_code": 416
-                        }
-                        raise requests.HTTPError(
-                            f"{error_msg}\nDebug: {json.dumps(debug_data, indent=2)}"
+                        error_details = (
+                            f"416 Range Not Satisfiable | "
+                            f"c_code={effective_c_code} | "
+                            f"page={page} | "
+                            f"url={response.url} | "
+                            f"query={query} | "
+                            f"response_preview={response.text[:200]}"
                         )
+                        raise requests.HTTPError(error_details)
                     
                     if response.status_code == 429:
                         retry_after = int(
@@ -158,22 +156,10 @@ class CMDBClient:
                     retries += 1
                     
                 except ValueError as e:
-                    debug_data = {
-                        "debug_info": debug_info,
-                        "records_fetched_before_error": len(all_records)
-                    }
-                    raise ValueError(
-                        f"Invalid JSON response: {str(e)}\nDebug: {json.dumps(debug_data, indent=2)}"
-                    )
+                    raise ValueError(f"Invalid JSON response: {str(e)} | url={self.CMDB_GETCI_PROD_API_URL}")
             else:
                 # Max retries exhausted
-                debug_data = {
-                    "debug_info": debug_info,
-                    "records_fetched": len(all_records)
-                }
-                raise RuntimeError(
-                    f"Failed after {max_retries} retries\nDebug: {json.dumps(debug_data, indent=2)}"
-                )
+                raise RuntimeError(f"Failed after {max_retries} retries | c_code={effective_c_code} | records_fetched={len(all_records)}")
 
     # EVERYTHING BELOW IS UNCHANGED
 
