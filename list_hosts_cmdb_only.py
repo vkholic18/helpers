@@ -10,7 +10,7 @@ def list_hosts_cmdb_only(c_code, offset=0, limit=500):
     try:
         client = CMDBClient()
 
-        hosts = client.fetch_cmdb_server_list(
+        hosts = client.fetch_cmdb_server_list_paginated(
             c_code=c_code,
             offset=int(offset),
             limit=int(limit),
