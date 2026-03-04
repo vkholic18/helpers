@@ -347,6 +347,145 @@ def is_compliant(checks):
 
 
 # ---------------------------------------------------------------------------
+# Report Generation
+# ---------------------------------------------------------------------------
+
+def get_failure_reasons(result, org_checks):
+    """
+    Generate human-readable failure reasons for a repository.
+    Returns a list of reason strings.
+    """
+    reasons = []
+    repo_checks = result.get("repo_checks", {})
+    bp_checks = result.get("branch_protection_checks", {})
+    
+    # Repository-level failures
+    if not repo_checks.get("is_private", True):
+        reasons.append("Repository is not private.")
+    if not repo_checks.get("metadata_file_exists", True):
+        reasons.append(".metadata file is missing.")
+    if not repo_checks.get("no_outside_collaborators", True):
+        collabs = repo_checks.get("outside_collaborators", [])
+        reasons.append(f"Outside collaborators exist: {', '.join(collabs)}.")
+    if not repo_checks.get("ssl_hooks_ok", True):
+        reasons.append("Webhook(s) with SSL verification disabled.")
+    
+    # Branch protection failures
+    if not bp_checks.get("protection_exists", True):
+        reasons.append("Branch Protection not enabled.")
+    else:
+        if not bp_checks.get("pr_required", True):
+            reasons.append("Pull request reviews not required.")
+        if not bp_checks.get("required_approvals_gte_1", True):
+            reasons.append("Required approving reviews is less than 1.")
+        if not bp_checks.get("dismiss_stale_reviews", True):
+            reasons.append("dismiss_stale_reviews not set to true.")
+        if not bp_checks.get("require_code_owner_review", True):
+            reasons.append("Code owner review not required.")
+        if not bp_checks.get("require_last_push_approval", True):
+            reasons.append("Last push approval not required.")
+        if not bp_checks.get("no_bypass_allowed", True):
+            reasons.append("enforce_admins is not enabled.")
+    
+    return reasons
+
+
+def get_org_failure_reasons(org_checks):
+    """
+    Generate human-readable failure reasons for organization-level checks.
+    Returns a list of reason strings.
+    """
+    reasons = []
+    required = org_checks.get("required", {})
+    recommended = org_checks.get("recommended", {})
+    
+    # Required org checks
+    if not required.get("base_permissions_none", True):
+        reasons.append("Base permissions is not set to 'No permission'.")
+    if not required.get("outside_collaborators_disabled", True):
+        reasons.append("Repository admins can add outside collaborators.")
+    if not required.get("org_hooks_ssl_enabled", True):
+        reasons.append("Organization webhook(s) with SSL verification disabled.")
+    
+    # Recommended org checks
+    if not recommended.get("repo_creation_private_only", True):
+        reasons.append("Members can create public repositories.")
+    if not recommended.get("visibility_change_disabled", True):
+        reasons.append("Members can change repository visibility.")
+    if not recommended.get("delete_transfer_disabled", True):
+        reasons.append("Members can delete or transfer repositories.")
+    if not recommended.get("team_creation_disabled", True):
+        reasons.append("Members can create teams.")
+    if not recommended.get("all_admins_active", True):
+        inactive = recommended.get("inactive_admins", [])
+        reasons.append(f"Inactive admins (no activity in 6 months): {', '.join(inactive)}.")
+    
+    return reasons
+
+
+def generate_markdown_report(org, summary, org_checks, results):
+    """
+    Generate a Markdown report in the format of GHE Branch Protection Branches Report.
+    """
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    lines = []
+    lines.append(f"# GHE Branch Protection Branches Report {timestamp}")
+    lines.append("(Operational Report)")
+    lines.append("")
+    lines.append("## Results")
+    lines.append("")
+    lines.append(f"- **Failures**: {summary['non_compliant']}")
+    lines.append(f"- **Compliant**: {summary['fully_compliant']}")
+    lines.append(f"- **Total Repositories**: {summary['total_repos']}")
+    lines.append("")
+    
+    # Organization-level findings
+    org_reasons = get_org_failure_reasons(org_checks)
+    if org_reasons:
+        lines.append("## Organization-Level Findings")
+        lines.append("")
+        lines.append("| Organization | Setting | Reason/s |")
+        lines.append("|--------------|---------|----------|")
+        for reason in org_reasons:
+            lines.append(f"| {org} | N/A | {reason} |")
+        lines.append("")
+    
+    # Non-compliant branches table
+    non_compliant = [r for r in results if not r["fully_compliant"]]
+    
+    if non_compliant:
+        lines.append("## Failure: Non-compliant Branches")
+        lines.append("")
+        lines.append("| Organization | Repository | Branch | Reason/s |")
+        lines.append("|--------------|------------|--------|----------|")
+        
+        for result in non_compliant:
+            repo = result["repository"]
+            branch = result["default_branch"]
+            reasons = get_failure_reasons(result, org_checks)
+            reason_text = " ".join(reasons) if reasons else "Unknown"
+            lines.append(f"| {org} | {repo} | {branch} | {reason_text} |")
+        
+        lines.append("")
+    
+    # Compliant repos summary
+    compliant = [r for r in results if r["fully_compliant"]]
+    if compliant:
+        lines.append("## Compliant Repositories")
+        lines.append("")
+        lines.append("| Organization | Repository | Branch |")
+        lines.append("|--------------|------------|--------|")
+        for result in compliant:
+            lines.append(f"| {org} | {result['repository']} | {result['default_branch']} |")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -413,6 +552,7 @@ def main():
             "branch_protection_checks": bp_checks,
         })
 
+    # Generate JSON output
     output = {
         "org":     ORG,
         "summary": summary,
@@ -420,13 +560,22 @@ def main():
         "repos":   results,
     }
 
-    print(json.dumps(output, indent=2))
-
-    # Also write to file for CI/audit ingestion
-    out_path = "compliance_report.json"
-    with open(out_path, "w") as f:
+    # Write JSON report
+    json_path = "compliance_report.json"
+    with open(json_path, "w") as f:
         json.dump(output, f, indent=2)
-    print(f"\nReport written to {out_path}")
+    print(f"JSON report written to {json_path}")
+
+    # Generate and write Markdown report
+    md_report = generate_markdown_report(ORG, summary, org_checks, results)
+    md_path = "compliance_report.md"
+    with open(md_path, "w") as f:
+        f.write(md_report)
+    print(f"Markdown report written to {md_path}")
+    
+    # Print markdown report to console
+    print("\n" + "=" * 80)
+    print(md_report)
 
 
 if __name__ == "__main__":
