@@ -2,6 +2,7 @@ import os
 import requests
 import time
 import json
+from datetime import datetime, timedelta
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 ORG = os.getenv("GITHUB_ORG")
@@ -43,6 +44,186 @@ def get(url, allow_404=False):
         return None
     r.raise_for_status()
     return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Organization-level checks
+# ---------------------------------------------------------------------------
+
+def get_org_settings():
+    """Fetch organization settings."""
+    url = f"{BASE}/orgs/{ORG}"
+    return get(url)
+
+
+def check_base_permissions(org_data):
+    """
+    Rule (REQUIRED): Base permissions must be 'No permission' (none).
+    Other values allow members to read all private repositories.
+    """
+    default_perm = org_data.get("default_repository_permission", "read")
+    return default_perm == "none"
+
+
+def check_outside_collaborators_disabled(org_data):
+    """
+    Rule (REQUIRED): Repository administrators should NOT be able to add 
+    outside collaborators. All access must be through teams managed in AccessHub.
+    """
+    # members_can_create_repositories is different - we need to check if 
+    # outside collaborators can be added by repo admins
+    # This is controlled by 'members_allowed_repository_creation_type' indirectly
+    # The actual setting is not directly exposed via API in all versions.
+    # We check via the org setting if available.
+    return not org_data.get("members_can_invite_outside_collaborators", True)
+
+
+def check_org_hooks_ssl():
+    """
+    Rule (REQUIRED): All organization webhooks must have SSL verification enabled.
+    Returns list of hook IDs that have SSL disabled.
+    """
+    hooks = get(f"{BASE}/orgs/{ORG}/hooks", allow_404=True) or []
+    time.sleep(SLEEP)
+    # insecure_ssl should be "0" or 0 or False or None for SSL to be enabled
+    return [h["id"] for h in hooks if h.get("config", {}).get("insecure_ssl") not in (None, "0", 0, False)]
+
+
+def check_repo_creation_private(org_data):
+    """
+    Rule (RECOMMENDED): Repository creation should default to Private.
+    Check members_allowed_repository_creation_type and related settings.
+    """
+    creation_type = org_data.get("members_allowed_repository_creation_type", "all")
+    can_create_internal = org_data.get("members_can_create_internal_repositories", True)
+    can_create_public = org_data.get("members_can_create_public_repositories", True)
+    
+    # Compliant if members cannot create public repos
+    return not can_create_public
+
+
+def check_integration_requests_disabled(org_data):
+    """
+    Rule (RECOMMENDED): Allow integration requests from outside collaborators = Disabled.
+    All access must be through teams, there should be no outside collaborators.
+    """
+    # This setting may not be directly exposed in all GitHub API versions
+    # We check if members_can_create_pages as a proxy or return the setting if available
+    return not org_data.get("members_can_create_public_pages", True)
+
+
+def check_visibility_change_disabled(org_data):
+    """
+    Rule (RECOMMENDED): Allow members to change repository visibilities = Disabled.
+    Requiring an organization administrator to change visibility helps ensure 
+    repositories that should not be public are not made public accidentally.
+    """
+    return not org_data.get("members_can_change_repo_visibility", True)
+
+
+def check_delete_transfer_disabled(org_data):
+    """
+    Rule (RECOMMENDED): Allow members to delete or transfer repositories = Disabled.
+    Limits accidental or badly-intentioned deletion/removal.
+    """
+    can_delete = org_data.get("members_can_delete_repositories", True)
+    can_fork = org_data.get("members_can_fork_private_repositories", True)
+    return not can_delete
+
+
+def check_profile_name_visibility(org_data):
+    """
+    Rule (RECOMMENDED): Allow members to see comment author's profile name = Enabled.
+    Preventing this just makes it harder to identify your colleagues.
+    """
+    # This is typically enabled by default, check if explicitly disabled
+    return org_data.get("members_can_see_comment_author_profile", True)
+
+
+def check_team_creation_disabled(org_data):
+    """
+    Rule (RECOMMENDED): Allow members to create teams = Disabled.
+    Helps ensure that access management through AccessHub is not subverted 
+    accidentally by someone adding a team and adding people to it directly.
+    """
+    return not org_data.get("members_can_create_teams", True)
+
+
+def check_org_admin_activity():
+    """
+    Rule (RECOMMENDED): Organization admins should have activity in the last 6 months.
+    Returns a dict with admin login and whether they have recent activity.
+    """
+    # Get organization members with admin role
+    admins = paginate(f"{BASE}/orgs/{ORG}/members?role=admin&per_page=100")
+    six_months_ago = datetime.utcnow() - timedelta(days=180)
+    
+    admin_activity = []
+    for admin in admins:
+        login = admin["login"]
+        # Check recent activity via events or audit log
+        # Using public events as a proxy (may need audit log for private activity)
+        events = get(f"{BASE}/users/{login}/events?per_page=1", allow_404=True) or []
+        
+        has_recent_activity = False
+        if events:
+            last_event_date = events[0].get("created_at", "")
+            if last_event_date:
+                try:
+                    event_date = datetime.strptime(last_event_date[:10], "%Y-%m-%d")
+                    has_recent_activity = event_date >= six_months_ago
+                except ValueError:
+                    pass
+        
+        admin_activity.append({
+            "login": login,
+            "has_recent_activity": has_recent_activity
+        })
+        time.sleep(SLEEP)
+    
+    return admin_activity
+
+
+def evaluate_org_compliance(org_data):
+    """
+    Evaluate all organization-level compliance rules.
+    Returns a dict with required and recommended checks.
+    """
+    bad_org_hooks = check_org_hooks_ssl()
+    admin_activity = check_org_admin_activity()
+    inactive_admins = [a["login"] for a in admin_activity if not a["has_recent_activity"]]
+    
+    return {
+        "required": {
+            "base_permissions_none": check_base_permissions(org_data),
+            "outside_collaborators_disabled": check_outside_collaborators_disabled(org_data),
+            "org_hooks_ssl_enabled": len(bad_org_hooks) == 0,
+            "org_hooks_with_ssl_disabled": bad_org_hooks,  # list for details
+        },
+        "recommended": {
+            "repo_creation_private_only": check_repo_creation_private(org_data),
+            "visibility_change_disabled": check_visibility_change_disabled(org_data),
+            "delete_transfer_disabled": check_delete_transfer_disabled(org_data),
+            "profile_name_visible": check_profile_name_visibility(org_data),
+            "team_creation_disabled": check_team_creation_disabled(org_data),
+            "all_admins_active": len(inactive_admins) == 0,
+            "inactive_admins": inactive_admins,  # list for details
+            "admin_activity_details": admin_activity,  # full details
+        }
+    }
+
+
+def is_org_compliant(org_checks):
+    """
+    Return True only if all REQUIRED organization rules pass.
+    Recommended rules are reported but don't affect compliance status.
+    """
+    required = org_checks.get("required", {})
+    # Exclude list fields from compliance check
+    return all(
+        v for k, v in required.items() 
+        if not isinstance(v, list)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +352,25 @@ def is_compliant(checks):
 
 def main():
     print(f"Scanning org: {ORG}  (base: {BASE})\n")
+    
+    # Organization-level compliance check
+    print("Checking organization-level compliance...")
+    org_data = get_org_settings()
+    org_checks = evaluate_org_compliance(org_data)
+    org_compliant = is_org_compliant(org_checks)
+    print(f"Organization compliance: {'PASS' if org_compliant else 'FAIL'}\n")
+    
+    # Repository-level compliance checks
     repos = get_repositories()
     print(f"Found {len(repos)} non-archived repositories.\n")
 
     results = []
-    summary = {"total": len(repos), "fully_compliant": 0, "non_compliant": 0}
+    summary = {
+        "total_repos": len(repos), 
+        "fully_compliant": 0, 
+        "non_compliant": 0,
+        "org_compliant": org_compliant
+    }
 
     for repo in repos:
         name            = repo["name"]
@@ -221,6 +416,7 @@ def main():
     output = {
         "org":     ORG,
         "summary": summary,
+        "organization_checks": org_checks,
         "repos":   results,
     }
 
