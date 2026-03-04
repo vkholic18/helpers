@@ -353,74 +353,95 @@ def is_compliant(checks):
 def get_failure_reasons(result, org_checks):
     """
     Generate human-readable failure reasons for a repository.
-    Returns a list of reason strings.
+    Returns a tuple of (list of rule names, list of reason strings).
     """
+    failed_rules = []
     reasons = []
     repo_checks = result.get("repo_checks", {})
     bp_checks = result.get("branch_protection_checks", {})
     
     # Repository-level failures
     if not repo_checks.get("is_private", True):
+        failed_rules.append("is_private")
         reasons.append("Repository is not private.")
     if not repo_checks.get("metadata_file_exists", True):
+        failed_rules.append("metadata_file_exists")
         reasons.append(".metadata file is missing.")
     if not repo_checks.get("no_outside_collaborators", True):
         collabs = repo_checks.get("outside_collaborators", [])
+        failed_rules.append("no_outside_collaborators")
         reasons.append(f"Outside collaborators exist: {', '.join(collabs)}.")
     if not repo_checks.get("ssl_hooks_ok", True):
+        failed_rules.append("ssl_hooks_ok")
         reasons.append("Webhook(s) with SSL verification disabled.")
     
     # Branch protection failures
     if not bp_checks.get("protection_exists", True):
+        failed_rules.append("protection_exists")
         reasons.append("Branch Protection not enabled.")
     else:
         if not bp_checks.get("pr_required", True):
+            failed_rules.append("pr_required")
             reasons.append("Pull request reviews not required.")
         if not bp_checks.get("required_approvals_gte_1", True):
+            failed_rules.append("required_approvals_gte_1")
             reasons.append("Required approving reviews is less than 1.")
         if not bp_checks.get("dismiss_stale_reviews", True):
+            failed_rules.append("dismiss_stale_reviews")
             reasons.append("dismiss_stale_reviews not set to true.")
         if not bp_checks.get("require_code_owner_review", True):
+            failed_rules.append("require_code_owner_review")
             reasons.append("Code owner review not required.")
         if not bp_checks.get("require_last_push_approval", True):
+            failed_rules.append("require_last_push_approval")
             reasons.append("Last push approval not required.")
         if not bp_checks.get("no_bypass_allowed", True):
+            failed_rules.append("enforce_admins")
             reasons.append("enforce_admins is not enabled.")
     
-    return reasons
+    return failed_rules, reasons
 
 
 def get_org_failure_reasons(org_checks):
     """
     Generate human-readable failure reasons for organization-level checks.
-    Returns a list of reason strings.
+    Returns a tuple of (list of rule names, list of reason strings).
     """
+    failed_rules = []
     reasons = []
     required = org_checks.get("required", {})
     recommended = org_checks.get("recommended", {})
     
     # Required org checks
     if not required.get("base_permissions_none", True):
+        failed_rules.append("base_permissions_none")
         reasons.append("Base permissions is not set to 'No permission'.")
     if not required.get("outside_collaborators_disabled", True):
+        failed_rules.append("outside_collaborators_disabled")
         reasons.append("Repository admins can add outside collaborators.")
     if not required.get("org_hooks_ssl_enabled", True):
+        failed_rules.append("org_hooks_ssl_enabled")
         reasons.append("Organization webhook(s) with SSL verification disabled.")
     
     # Recommended org checks
     if not recommended.get("repo_creation_private_only", True):
+        failed_rules.append("repo_creation_private_only")
         reasons.append("Members can create public repositories.")
     if not recommended.get("visibility_change_disabled", True):
+        failed_rules.append("visibility_change_disabled")
         reasons.append("Members can change repository visibility.")
     if not recommended.get("delete_transfer_disabled", True):
+        failed_rules.append("delete_transfer_disabled")
         reasons.append("Members can delete or transfer repositories.")
     if not recommended.get("team_creation_disabled", True):
+        failed_rules.append("team_creation_disabled")
         reasons.append("Members can create teams.")
     if not recommended.get("all_admins_active", True):
         inactive = recommended.get("inactive_admins", [])
+        failed_rules.append("all_admins_active")
         reasons.append(f"Inactive admins (no activity in 6 months): {', '.join(inactive)}.")
     
-    return reasons
+    return failed_rules, reasons
 
 
 def generate_markdown_report(org, summary, org_checks, results):
@@ -443,14 +464,15 @@ def generate_markdown_report(org, summary, org_checks, results):
     lines.append("")
     
     # Organization-level findings
-    org_reasons = get_org_failure_reasons(org_checks)
+    org_failed_rules, org_reasons = get_org_failure_reasons(org_checks)
     if org_reasons:
         lines.append("## Organization-Level Findings")
         lines.append("")
-        lines.append("| Organization | Setting | Reason/s |")
-        lines.append("|--------------|---------|----------|")
-        for reason in org_reasons:
-            lines.append(f"| {org} | N/A | {reason} |")
+        lines.append("| Organization | Rules Failing | Reason/s |")
+        lines.append("|--------------|---------------|----------|")
+        rules_text = ", ".join(org_failed_rules) if org_failed_rules else "N/A"
+        reason_text = " ".join(org_reasons) if org_reasons else "N/A"
+        lines.append(f"| {org} | {rules_text} | {reason_text} |")
         lines.append("")
     
     # Non-compliant branches table
@@ -459,15 +481,16 @@ def generate_markdown_report(org, summary, org_checks, results):
     if non_compliant:
         lines.append("## Failure: Non-compliant Branches")
         lines.append("")
-        lines.append("| Organization | Repository | Branch | Reason/s |")
-        lines.append("|--------------|------------|--------|----------|")
+        lines.append("| Organization | Repository | Branch | Rules Failing | Reason/s |")
+        lines.append("|--------------|------------|--------|---------------|----------|")
         
         for result in non_compliant:
             repo = result["repository"]
             branch = result["default_branch"]
-            reasons = get_failure_reasons(result, org_checks)
+            failed_rules, reasons = get_failure_reasons(result, org_checks)
+            rules_text = ", ".join(failed_rules) if failed_rules else "N/A"
             reason_text = " ".join(reasons) if reasons else "Unknown"
-            lines.append(f"| {org} | {repo} | {branch} | {reason_text} |")
+            lines.append(f"| {org} | {repo} | {branch} | {rules_text} | {reason_text} |")
         
         lines.append("")
     
