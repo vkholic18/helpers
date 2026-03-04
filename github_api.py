@@ -2,7 +2,7 @@ import os
 import requests
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 ORG = os.getenv("GITHUB_ORG")
@@ -156,7 +156,7 @@ def check_org_admin_activity():
     """
     # Get organization members with admin role
     admins = paginate(f"{BASE}/orgs/{ORG}/members?role=admin&per_page=100")
-    six_months_ago = datetime.utcnow() - timedelta(days=180)
+    six_months_ago = datetime.now(timezone.utc) - timedelta(days=180)
     
     admin_activity = []
     for admin in admins:
@@ -170,7 +170,7 @@ def check_org_admin_activity():
             last_event_date = events[0].get("created_at", "")
             if last_event_date:
                 try:
-                    event_date = datetime.strptime(last_event_date[:10], "%Y-%m-%d")
+                    event_date = datetime.strptime(last_event_date[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
                     has_recent_activity = event_date >= six_months_ago
                 except ValueError:
                     pass
