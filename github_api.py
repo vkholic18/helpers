@@ -3,14 +3,8 @@ import requests
 import time
 import json
 from datetime import datetime, timedelta, timezone
-
-try:
-    import openpyxl
-    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-    EXCEL_AVAILABLE = True
-except ImportError:
-    EXCEL_AVAILABLE = False
-    print("Warning: openpyxl not installed. Excel export will be skipped. Install with: pip install openpyxl")
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 ORG = os.getenv("GITHUB_ORG")
@@ -575,10 +569,6 @@ def generate_excel_report(org, summary, org_checks, results):
     """
     Generate an Excel report with formatted tables for better readability.
     """
-    if not EXCEL_AVAILABLE:
-        print("Excel export skipped - openpyxl not installed.")
-        return None
-    
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     
@@ -829,8 +819,7 @@ def main():
     
     # Generate and write Excel report
     excel_path = generate_excel_report(ORG, summary, org_checks, results)
-    if excel_path:
-        print(f"Excel report written to {excel_path}")
+    print(f"Excel report written to {excel_path}")
     
     # Print markdown report to console
     print("\n" + "=" * 80)
