@@ -4,6 +4,14 @@ import time
 import json
 from datetime import datetime, timedelta, timezone
 
+try:
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    print("Warning: openpyxl not installed. Excel export will be skipped. Install with: pip install openpyxl")
+
 TOKEN = os.getenv("GITHUB_TOKEN")
 ORG = os.getenv("GITHUB_ORG")
 BASE = os.getenv("GITHUB_BASE")
@@ -58,8 +66,12 @@ def get_org_settings():
 
 def check_base_permissions(org_data):
     """
-    Rule (REQUIRED): Base permissions must be 'No permission' (none).
-    Other values allow members to read all private repositories.
+    Section: Member privileges
+    Setting: Base permissions
+    Value: No permission
+    Enforcement: Required
+    Auditree: default_repository_permission
+    Comments: Other values allow member's to read all private repositories.
     """
     default_perm = org_data.get("default_repository_permission", "read")
     return default_perm == "none"
@@ -67,20 +79,24 @@ def check_base_permissions(org_data):
 
 def check_outside_collaborators_disabled(org_data):
     """
-    Rule (REQUIRED): Repository administrators should NOT be able to add 
-    outside collaborators. All access must be through teams managed in AccessHub.
+    Section: Member privileges
+    Setting: Allow repository administrators to add outside collaborators to repositories for this organization
+    Value: Disabled
+    Enforcement: Required
+    Auditree: org_outside_collaborators
+    Comments: All access has to be through teams managed in AccessHub.
     """
-    # members_can_create_repositories is different - we need to check if 
-    # outside collaborators can be added by repo admins
-    # This is controlled by 'members_allowed_repository_creation_type' indirectly
-    # The actual setting is not directly exposed via API in all versions.
-    # We check via the org setting if available.
     return not org_data.get("members_can_invite_outside_collaborators", True)
 
 
 def check_org_hooks_ssl():
     """
-    Rule (REQUIRED): All organization webhooks must have SSL verification enabled.
+    Section: Hooks
+    Setting: SSL verification
+    Value: Enable SSL verification
+    Enforcement: Required
+    Auditree: unsecure_org_hooks
+    Comments: Needed to maintain confidentiality.
     Returns list of hook IDs that have SSL disabled.
     """
     hooks = get(f"{BASE}/orgs/{ORG}/hooks", allow_404=True) or []
@@ -91,8 +107,13 @@ def check_org_hooks_ssl():
 
 def check_repo_creation_private(org_data):
     """
-    Rule (RECOMMENDED): Repository creation should default to Private.
-    Check members_allowed_repository_creation_type and related settings.
+    Section: Member privileges
+    Setting: Repository Creation
+    Value: Private
+    Enforcement: Recommended
+    Auditree: members_allowed_repository_creation_type, members_can_create_internal_repositories, members_can_create_public_repositories
+    Comments: Requiring an organization administrator to create these helps ensure repositories 
+              that should not be public are not created accidentally as public.
     """
     creation_type = org_data.get("members_allowed_repository_creation_type", "all")
     can_create_internal = org_data.get("members_can_create_internal_repositories", True)
@@ -104,54 +125,78 @@ def check_repo_creation_private(org_data):
 
 def check_integration_requests_disabled(org_data):
     """
-    Rule (RECOMMENDED): Allow integration requests from outside collaborators = Disabled.
-    All access must be through teams, there should be no outside collaborators.
+    Section: Member privileges
+    Setting: Allow integration requests from outside collaborators
+    Value: Disabled
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: All access has to be through teams, there should be no outside collaborators.
     """
     # This setting may not be directly exposed in all GitHub API versions
-    # We check if members_can_create_pages as a proxy or return the setting if available
     return not org_data.get("members_can_create_public_pages", True)
 
 
 def check_visibility_change_disabled(org_data):
     """
-    Rule (RECOMMENDED): Allow members to change repository visibilities = Disabled.
-    Requiring an organization administrator to change visibility helps ensure 
-    repositories that should not be public are not made public accidentally.
+    Section: Member privileges
+    Setting: Allow members to change repository visibilities for this organization
+    Value: Disabled
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: Requiring an organization administrator to change visibility helps ensure 
+              repositories that should not be public are not made public accidentally.
     """
     return not org_data.get("members_can_change_repo_visibility", True)
 
 
 def check_delete_transfer_disabled(org_data):
     """
-    Rule (RECOMMENDED): Allow members to delete or transfer repositories = Disabled.
-    Limits accidental or badly-intentioned deletion/removal.
+    Section: Member privileges
+    Setting: Allow members to delete or transfer repositories for this organization
+    Value: Disabled
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: Limits accidental or badly-intentioned deletion/removal.
     """
     can_delete = org_data.get("members_can_delete_repositories", True)
-    can_fork = org_data.get("members_can_fork_private_repositories", True)
     return not can_delete
 
 
 def check_profile_name_visibility(org_data):
     """
-    Rule (RECOMMENDED): Allow members to see comment author's profile name = Enabled.
-    Preventing this just makes it harder to identify your colleagues.
+    Section: Member privileges
+    Setting: Allow members to see comment author's profile name in private repositories
+    Value: Enabled
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: Preventing this just makes it harder to identify your colleagues.
     """
-    # This is typically enabled by default, check if explicitly disabled
     return org_data.get("members_can_see_comment_author_profile", True)
 
 
 def check_team_creation_disabled(org_data):
     """
-    Rule (RECOMMENDED): Allow members to create teams = Disabled.
-    Helps ensure that access management through AccessHub is not subverted 
-    accidentally by someone adding a team and adding people to it directly.
+    Section: Member privileges
+    Setting: Allow members to create teams
+    Value: Disabled
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: Helps ensure that access management through AccessHub is not subverted 
+              accidentally by someone adding a team and adding people to it directly.
     """
     return not org_data.get("members_can_create_teams", True)
 
 
 def check_org_admin_activity():
     """
-    Rule (RECOMMENDED): Organization admins should have activity in the last 6 months.
+    Section: N/A
+    Setting: Organization admins should have activity in the last 6 months
+    Value: Active
+    Enforcement: Recommended
+    Auditree: N/A
+    Comments: This is not a configurable option in GitHub. Organization admin are all-powerful 
+              within the organization, having an inactive admin shows that the people who are 
+              in this role are not getting scrutiny or revalidation.
     Returns a dict with admin login and whether they have recent activity.
     """
     # Get organization members with admin role
@@ -195,19 +240,23 @@ def evaluate_org_compliance(org_data):
     
     return {
         "required": {
-            "base_permissions_none": check_base_permissions(org_data),
-            "outside_collaborators_disabled": check_outside_collaborators_disabled(org_data),
-            "org_hooks_ssl_enabled": len(bad_org_hooks) == 0,
-            "org_hooks_with_ssl_disabled": bad_org_hooks,  # list for details
+            # Auditree: default_repository_permission
+            "default_repository_permission": check_base_permissions(org_data),
+            # Auditree: org_outside_collaborators
+            "org_outside_collaborators": check_outside_collaborators_disabled(org_data),
+            # Auditree: unsecure_org_hooks
+            "unsecure_org_hooks": len(bad_org_hooks) == 0,
+            "unsecure_org_hooks_list": bad_org_hooks,  # list for details
         },
         "recommended": {
-            "repo_creation_private_only": check_repo_creation_private(org_data),
+            # Auditree: members_can_create_public_repositories
+            "members_can_create_public_repositories": check_repo_creation_private(org_data),
             "integration_requests_disabled": check_integration_requests_disabled(org_data),
             "visibility_change_disabled": check_visibility_change_disabled(org_data),
             "delete_transfer_disabled": check_delete_transfer_disabled(org_data),
             "profile_name_visible": check_profile_name_visibility(org_data),
             "team_creation_disabled": check_team_creation_disabled(org_data),
-            "all_admins_active": len(inactive_admins) == 0,
+            "admin_activity_6_months": len(inactive_admins) == 0,
             "inactive_admins": inactive_admins,  # list for details
             "admin_activity_details": admin_activity,  # full details
         }
@@ -294,19 +343,27 @@ def get_branch_protection(repo_name, branch):
 def evaluate_branch_protection(protection):
     """
     Evaluate all REQUIRED branch protection rules from the CISO policy.
+    Uses Auditree naming conventions.
 
     Returns a dict of {rule_name: bool} where True means the rule is satisfied.
     """
     if protection is None:
         # No protection at all — every rule fails
         return {
-            "protection_exists":              False,
-            "pr_required":                    False,
-            "required_approvals_gte_1":       False,
-            "dismiss_stale_reviews":          False,
-            "require_code_owner_review":      False,
+            # Auditree: needed_protection
+            "needed_protection":              False,
+            # Auditree: required_pr_review
+            "required_pr_review":             False,
+            # Auditree: approvers_count
+            "approvers_count":                False,
+            # Auditree: dismiss_stale
+            "dismiss_stale":                  False,
+            # Auditree: code_owners_review
+            "code_owners_review":             False,
+            # Auditree: require_last_push_approval
             "require_last_push_approval":     False,
-            "no_bypass_allowed":              False,
+            # Auditree: not_bypass
+            "not_bypass":                     False,
         }
 
     pr = protection.get("required_pull_request_reviews") or {}
@@ -319,26 +376,26 @@ def evaluate_branch_protection(protection):
     )
 
     return {
-        # At least one protection rule exists
-        "protection_exists": True,
+        # Auditree: needed_protection - One or more branch protection rules exist
+        "needed_protection": True,
 
-        # Require a pull request before merging
-        "pr_required": bool(pr),
+        # Auditree: required_pr_review - Require a pull request before merging
+        "required_pr_review": bool(pr),
 
-        # Required approvals >= 1
-        "required_approvals_gte_1": pr.get("required_approving_review_count", 0) >= 1,
+        # Auditree: approvers_count - Required approvals >= 1
+        "approvers_count": pr.get("required_approving_review_count", 0) >= 1,
 
-        # Dismiss stale reviews when new commits are pushed
-        "dismiss_stale_reviews": pr.get("dismiss_stale_reviews", False),
+        # Auditree: dismiss_stale - Dismiss stale reviews when new commits are pushed
+        "dismiss_stale": pr.get("dismiss_stale_reviews", False),
 
-        # Require review from Code Owners
-        "require_code_owner_review": pr.get("require_code_owner_reviews", False),
+        # Auditree: code_owners_review - Require review from Code Owners
+        "code_owners_review": pr.get("require_code_owner_reviews", False),
 
-        # Require approval of the most recent push (prevents self-approval loop)
+        # Auditree: require_last_push_approval - Require approval of the most recent push
         "require_last_push_approval": pr.get("require_last_push_approval", False),
 
-        # Admins must NOT be able to bypass protection rules
-        "no_bypass_allowed": not bypass_allowed,
+        # Auditree: not_bypass - Do not allow bypassing the above settings
+        "not_bypass": not bypass_allowed,
     }
 
 
@@ -354,6 +411,7 @@ def is_compliant(checks):
 def get_failure_reasons(result, org_checks):
     """
     Generate human-readable failure reasons for a repository.
+    Uses Auditree naming conventions from documentation.
     Returns a tuple of (list of rule names, list of reason strings).
     """
     failed_rules = []
@@ -361,44 +419,44 @@ def get_failure_reasons(result, org_checks):
     repo_checks = result.get("repo_checks", {})
     bp_checks = result.get("branch_protection_checks", {})
     
-    # Repository-level failures
-    if not repo_checks.get("is_private", True):
-        failed_rules.append("is_private")
-        reasons.append("Repository is not private.")
-    if not repo_checks.get("metadata_file_exists", True):
-        failed_rules.append("metadata_file_exists")
-        reasons.append(".metadata file is missing.")
-    if not repo_checks.get("no_outside_collaborators", True):
+    # Repository-level failures (Auditree names)
+    if not repo_checks.get("private_if_sensitive", True):
+        failed_rules.append("private_if_sensitive")
+        reasons.append("Repository visibility is set to Public. Production repositories must be Private to protect sensitive code and IP.")
+    if not repo_checks.get("metadata_existing", True):
+        failed_rules.append("metadata_existing")
+        reasons.append("Missing .metadata file in root directory. This file is required for repository tracking and compliance verification.")
+    if not repo_checks.get("collaborators_in_org", True):
         collabs = repo_checks.get("outside_collaborators", [])
-        failed_rules.append("no_outside_collaborators")
-        reasons.append(f"Outside collaborators exist: {', '.join(collabs)}.")
-    if not repo_checks.get("ssl_hooks_ok", True):
-        failed_rules.append("ssl_hooks_ok")
-        reasons.append("Webhook(s) with SSL verification disabled.")
+        failed_rules.append("collaborators_in_org")
+        reasons.append(f"Outside collaborators detected: [{', '.join(collabs)}]. All access must be managed through teams in AccessHub, not individual collaborators.")
+    if not repo_checks.get("unsecure_hooks", True):
+        failed_rules.append("unsecure_hooks")
+        reasons.append("One or more webhooks have SSL verification disabled. SSL must be enabled on all webhooks to maintain confidentiality of data in transit.")
     
-    # Branch protection failures
-    if not bp_checks.get("protection_exists", True):
-        failed_rules.append("protection_exists")
-        reasons.append("Branch Protection not enabled.")
+    # Branch protection failures (Auditree names)
+    if not bp_checks.get("needed_protection", True):
+        failed_rules.append("needed_protection")
+        reasons.append("Branch protection rules are not configured on the default branch. Branch protection is required to enforce code review and prevent unauthorized changes.")
     else:
-        if not bp_checks.get("pr_required", True):
-            failed_rules.append("pr_required")
-            reasons.append("Pull request reviews not required.")
-        if not bp_checks.get("required_approvals_gte_1", True):
-            failed_rules.append("required_approvals_gte_1")
-            reasons.append("Required approving reviews is less than 1.")
-        if not bp_checks.get("dismiss_stale_reviews", True):
-            failed_rules.append("dismiss_stale_reviews")
-            reasons.append("dismiss_stale_reviews not set to true.")
-        if not bp_checks.get("require_code_owner_review", True):
-            failed_rules.append("require_code_owner_review")
-            reasons.append("Code owner review not required.")
+        if not bp_checks.get("required_pr_review", True):
+            failed_rules.append("required_pr_review")
+            reasons.append("'Require a pull request before merging' is not enabled. All changes must go through a pull request to ensure proper code review before merging.")
+        if not bp_checks.get("approvers_count", True):
+            failed_rules.append("approvers_count")
+            reasons.append("'Required number of approvals before merging' is set to 0. At least 1 approval is required to ensure changes are reviewed by another team member.")
+        if not bp_checks.get("dismiss_stale", True):
+            failed_rules.append("dismiss_stale")
+            reasons.append("'Dismiss stale pull request approvals when new commits are pushed' is disabled. This must be enabled to ensure reviewers approve the final version of code.")
+        if not bp_checks.get("code_owners_review", True):
+            failed_rules.append("code_owners_review")
+            reasons.append("'Require review from Code Owners' is disabled. Code owners must review changes to critical files they are responsible for.")
         if not bp_checks.get("require_last_push_approval", True):
             failed_rules.append("require_last_push_approval")
-            reasons.append("Last push approval not required.")
-        if not bp_checks.get("no_bypass_allowed", True):
-            failed_rules.append("enforce_admins")
-            reasons.append("enforce_admins is not enabled.")
+            reasons.append("'Require approval of the most recent reviewable push' is disabled. This prevents authors from self-approving by pushing after getting approval.")
+        if not bp_checks.get("not_bypass", True):
+            failed_rules.append("not_bypass")
+            reasons.append("'Do not allow bypassing the above settings' is disabled. Administrators should not be able to bypass branch protection rules.")
     
     return failed_rules, reasons
 
@@ -406,6 +464,7 @@ def get_failure_reasons(result, org_checks):
 def get_org_failure_reasons(org_checks):
     """
     Generate human-readable failure reasons for organization-level checks.
+    Uses Auditree naming conventions from documentation.
     Returns a tuple of (list of rule names, list of reason strings).
     """
     failed_rules = []
@@ -413,37 +472,37 @@ def get_org_failure_reasons(org_checks):
     required = org_checks.get("required", {})
     recommended = org_checks.get("recommended", {})
     
-    # Required org checks
-    if not required.get("base_permissions_none", True):
-        failed_rules.append("base_permissions_none")
-        reasons.append("Base permissions is not set to 'No permission'.")
-    if not required.get("outside_collaborators_disabled", True):
-        failed_rules.append("outside_collaborators_disabled")
-        reasons.append("Repository admins can add outside collaborators.")
-    if not required.get("org_hooks_ssl_enabled", True):
-        failed_rules.append("org_hooks_ssl_enabled")
-        reasons.append("Organization webhook(s) with SSL verification disabled.")
+    # Required org checks (Auditree names)
+    if not required.get("default_repository_permission", True):
+        failed_rules.append("default_repository_permission")
+        reasons.append("Base repository permissions is not set to 'No permission'. Other values allow all members to read private repositories by default, violating least-privilege principle.")
+    if not required.get("org_outside_collaborators", True):
+        failed_rules.append("org_outside_collaborators")
+        reasons.append("Repository administrators are allowed to add outside collaborators. This must be disabled - all access must be managed through teams in AccessHub.")
+    if not required.get("unsecure_org_hooks", True):
+        failed_rules.append("unsecure_org_hooks")
+        reasons.append("One or more organization-level webhooks have SSL verification disabled. SSL is required on all webhooks to maintain confidentiality.")
     
-    # Recommended org checks
-    if not recommended.get("repo_creation_private_only", True):
-        failed_rules.append("repo_creation_private_only")
-        reasons.append("Members can create public repositories.")
+    # Recommended org checks (Auditree names where available)
+    if not recommended.get("members_can_create_public_repositories", True):
+        failed_rules.append("members_can_create_public_repositories")
+        reasons.append("Members can create public repositories. This should be restricted to Private only to prevent accidental exposure of sensitive code.")
     if not recommended.get("integration_requests_disabled", True):
         failed_rules.append("integration_requests_disabled")
-        reasons.append("Integration requests from outside collaborators are allowed.")
+        reasons.append("Integration requests from outside collaborators are allowed. This should be disabled since all access must be through teams.")
     if not recommended.get("visibility_change_disabled", True):
         failed_rules.append("visibility_change_disabled")
-        reasons.append("Members can change repository visibility.")
+        reasons.append("Members can change repository visibility. This should be disabled to prevent repositories from being accidentally made public.")
     if not recommended.get("delete_transfer_disabled", True):
         failed_rules.append("delete_transfer_disabled")
-        reasons.append("Members can delete or transfer repositories.")
+        reasons.append("Members can delete or transfer repositories. This should be disabled to prevent accidental or malicious deletion/removal of repositories.")
     if not recommended.get("team_creation_disabled", True):
         failed_rules.append("team_creation_disabled")
-        reasons.append("Members can create teams.")
-    if not recommended.get("all_admins_active", True):
+        reasons.append("Members can create teams. This should be disabled to ensure access management through AccessHub is not bypassed by creating ad-hoc teams.")
+    if not recommended.get("admin_activity_6_months", True):
         inactive = recommended.get("inactive_admins", [])
-        failed_rules.append("all_admins_active")
-        reasons.append(f"Inactive admins (no activity in 6 months): {', '.join(inactive)}.")
+        failed_rules.append("admin_activity_6_months")
+        reasons.append(f"Organization admins with no activity in 6+ months: [{', '.join(inactive)}]. Inactive admins indicate lack of proper access revalidation for privileged accounts.")
     
     return failed_rules, reasons
 
@@ -512,6 +571,170 @@ def generate_markdown_report(org, summary, org_checks, results):
     return "\n".join(lines)
 
 
+def generate_excel_report(org, summary, org_checks, results):
+    """
+    Generate an Excel report with formatted tables for better readability.
+    """
+    if not EXCEL_AVAILABLE:
+        print("Excel export skipped - openpyxl not installed.")
+        return None
+    
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    
+    wb = Workbook()
+    
+    # Define styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    wrap_alignment = Alignment(wrap_text=True, vertical='top')
+    
+    # ==================== Sheet 1: Summary ====================
+    ws_summary = wb.active
+    ws_summary.title = "Summary"
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ws_summary['A1'] = f"GHE Compliance Report - {org}"
+    ws_summary['A1'].font = Font(bold=True, size=16)
+    ws_summary['A2'] = f"Generated: {timestamp}"
+    ws_summary['A4'] = "Results Summary"
+    ws_summary['A4'].font = Font(bold=True, size=12)
+    
+    ws_summary['A5'] = "Total Repositories"
+    ws_summary['B5'] = summary['total_repos']
+    ws_summary['A6'] = "Compliant"
+    ws_summary['B6'] = summary['fully_compliant']
+    ws_summary['B6'].fill = pass_fill
+    ws_summary['A7'] = "Non-Compliant"
+    ws_summary['B7'] = summary['non_compliant']
+    if summary['non_compliant'] > 0:
+        ws_summary['B7'].fill = fail_fill
+    ws_summary['A8'] = "Organization Compliant"
+    ws_summary['B8'] = "Yes" if summary.get('org_compliant', False) else "No"
+    
+    ws_summary.column_dimensions['A'].width = 25
+    ws_summary.column_dimensions['B'].width = 15
+    
+    # ==================== Sheet 2: Organization Findings ====================
+    ws_org = wb.create_sheet("Organization Findings")
+    
+    org_headers = ["Organization", "Rule Name", "Enforcement", "Status", "Reason"]
+    for col, header in enumerate(org_headers, 1):
+        cell = ws_org.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+    
+    # Organization rules data (using Auditree naming conventions)
+    org_rules = [
+        ("default_repository_permission", "Required", org_checks.get("required", {}).get("default_repository_permission", False),
+         "Base repository permissions must be set to 'No permission'. Other values allow all members to read private repositories."),
+        ("org_outside_collaborators", "Required", org_checks.get("required", {}).get("org_outside_collaborators", False),
+         "Repository administrators must not be allowed to add outside collaborators. All access must be through teams in AccessHub."),
+        ("unsecure_org_hooks", "Required", org_checks.get("required", {}).get("unsecure_org_hooks", False),
+         "All organization webhooks must have SSL verification enabled to maintain confidentiality."),
+        ("members_can_create_public_repositories", "Recommended", org_checks.get("recommended", {}).get("members_can_create_public_repositories", False),
+         "Repository creation should be restricted to Private only to prevent accidental public exposure."),
+        ("integration_requests_disabled", "Recommended", org_checks.get("recommended", {}).get("integration_requests_disabled", False),
+         "Integration requests from outside collaborators should be disabled."),
+        ("visibility_change_disabled", "Recommended", org_checks.get("recommended", {}).get("visibility_change_disabled", False),
+         "Members should not be able to change repository visibility to prevent accidental public exposure."),
+        ("delete_transfer_disabled", "Recommended", org_checks.get("recommended", {}).get("delete_transfer_disabled", False),
+         "Members should not be able to delete or transfer repositories to limit accidental or malicious removal."),
+        ("team_creation_disabled", "Recommended", org_checks.get("recommended", {}).get("team_creation_disabled", False),
+         "Members should not be able to create teams to ensure access management through AccessHub is not bypassed."),
+        ("admin_activity_6_months", "Recommended", org_checks.get("recommended", {}).get("admin_activity_6_months", False),
+         "All organization admins should have activity in the last 6 months for proper access revalidation."),
+    ]
+    
+    row = 2
+    for rule_name, enforcement, status, reason in org_rules:
+        ws_org.cell(row=row, column=1, value=org).border = thin_border
+        ws_org.cell(row=row, column=2, value=rule_name).border = thin_border
+        ws_org.cell(row=row, column=3, value=enforcement).border = thin_border
+        status_cell = ws_org.cell(row=row, column=4, value="PASS" if status else "FAIL")
+        status_cell.border = thin_border
+        status_cell.fill = pass_fill if status else fail_fill
+        reason_cell = ws_org.cell(row=row, column=5, value=reason)
+        reason_cell.border = thin_border
+        reason_cell.alignment = wrap_alignment
+        row += 1
+    
+    ws_org.column_dimensions['A'].width = 15
+    ws_org.column_dimensions['B'].width = 30
+    ws_org.column_dimensions['C'].width = 15
+    ws_org.column_dimensions['D'].width = 10
+    ws_org.column_dimensions['E'].width = 80
+    
+    # ==================== Sheet 3: Non-Compliant Repositories ====================
+    ws_fail = wb.create_sheet("Non-Compliant Repos")
+    
+    fail_headers = ["Organization", "Repository", "Branch", "Rules Failing", "Reason/s"]
+    for col, header in enumerate(fail_headers, 1):
+        cell = ws_fail.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+    
+    row = 2
+    for result in results:
+        if not result["fully_compliant"]:
+            failed_rules, reasons = get_failure_reasons(result, org_checks)
+            ws_fail.cell(row=row, column=1, value=org).border = thin_border
+            ws_fail.cell(row=row, column=2, value=result["repository"]).border = thin_border
+            ws_fail.cell(row=row, column=3, value=result["default_branch"]).border = thin_border
+            ws_fail.cell(row=row, column=4, value=", ".join(failed_rules)).border = thin_border
+            reason_cell = ws_fail.cell(row=row, column=5, value=" | ".join(reasons))
+            reason_cell.border = thin_border
+            reason_cell.alignment = wrap_alignment
+            row += 1
+    
+    ws_fail.column_dimensions['A'].width = 15
+    ws_fail.column_dimensions['B'].width = 30
+    ws_fail.column_dimensions['C'].width = 15
+    ws_fail.column_dimensions['D'].width = 40
+    ws_fail.column_dimensions['E'].width = 100
+    
+    # ==================== Sheet 4: Compliant Repositories ====================
+    ws_pass = wb.create_sheet("Compliant Repos")
+    
+    pass_headers = ["Organization", "Repository", "Branch", "Status"]
+    for col, header in enumerate(pass_headers, 1):
+        cell = ws_pass.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+    
+    row = 2
+    for result in results:
+        if result["fully_compliant"]:
+            ws_pass.cell(row=row, column=1, value=org).border = thin_border
+            ws_pass.cell(row=row, column=2, value=result["repository"]).border = thin_border
+            ws_pass.cell(row=row, column=3, value=result["default_branch"]).border = thin_border
+            status_cell = ws_pass.cell(row=row, column=4, value="PASS")
+            status_cell.border = thin_border
+            status_cell.fill = pass_fill
+            row += 1
+    
+    ws_pass.column_dimensions['A'].width = 15
+    ws_pass.column_dimensions['B'].width = 30
+    ws_pass.column_dimensions['C'].width = 15
+    ws_pass.column_dimensions['D'].width = 10
+    
+    # Save the workbook
+    excel_path = "compliance_report.xlsx"
+    wb.save(excel_path)
+    return excel_path
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -565,17 +788,21 @@ def main():
             "default_branch":        default_branch,
             "fully_compliant":       compliant,
 
-            # Repository-level findings
+            # Repository-level findings (Auditree naming)
             "repo_checks": {
-                "is_private":               is_private,
-                "metadata_file_exists":     metadata_exists,
-                "no_outside_collaborators": len(outside_collabs) == 0,
+                # Auditree: private_if_sensitive
+                "private_if_sensitive":     is_private,
+                # Auditree: metadata_existing
+                "metadata_existing":        metadata_exists,
+                # Auditree: collaborators_in_org
+                "collaborators_in_org":     len(outside_collabs) == 0,
                 "outside_collaborators":    outside_collabs,   # list; empty = good
-                "ssl_hooks_ok":             len(bad_hooks) == 0,
+                # Auditree: unsecure_hooks
+                "unsecure_hooks":           len(bad_hooks) == 0,
                 "hooks_with_ssl_disabled":  bad_hooks,         # list; empty = good
             },
 
-            # Branch-protection findings (all required by CISO policy)
+            # Branch-protection findings (Auditree naming)
             "branch_protection_checks": bp_checks,
         })
 
@@ -599,6 +826,11 @@ def main():
     with open(md_path, "w") as f:
         f.write(md_report)
     print(f"Markdown report written to {md_path}")
+    
+    # Generate and write Excel report
+    excel_path = generate_excel_report(ORG, summary, org_checks, results)
+    if excel_path:
+        print(f"Excel report written to {excel_path}")
     
     # Print markdown report to console
     print("\n" + "=" * 80)
