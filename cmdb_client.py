@@ -260,7 +260,7 @@ class CMDBClient:
                 "Failed to communicate with CMDB inventory service. Please try again later."
             )
 
-    def fetch_cmdb_server_list_paginated(
+   def fetch_cmdb_server_list_paginated(
         self,
         c_code: Optional[str] = None,
         dns_domain: Optional[str] = None,
@@ -269,7 +269,7 @@ class CMDBClient:
     ) -> List[Dict[str, Any]]:
         """
         Fetch ALL server records from CMDB (Live only).
-        Uses sysparm_start pagination to retrieve beyond the 1000-record API limit.
+        Uses sysparm_offset pagination, treats 416 as end of results.
         """
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
@@ -285,24 +285,28 @@ class CMDBClient:
         if serial_number:
             base_query += f"^serial_number={serial_number}"
     
-        params = {
-            "sysparm_query": base_query,
-            "sysparm_table": "cmdb_ci_server",
-            "sysparm_display_value": "true",
-            "sysparm_limit": 1000,
-        }
-    
         all_records = []
-        start = 0
+        offset = 0
+        limit = 1000
     
         while True:
-            params["sysparm_start"] = start
+            params = {
+                "sysparm_query": base_query,
+                "sysparm_table": "cmdb_ci_server",
+                "sysparm_display_value": "true",
+                "sysparm_limit": limit,
+                "sysparm_offset": offset,
+            }
+    
             response = requests.get(
                 self.CMDB_GETCI_PROD_API_URL,
                 headers=headers,
                 params=params,
                 timeout=60,
             )
+    
+            if response.status_code == 416:
+                break  # offset exceeded total records, we're done
     
             if response.status_code != 200:
                 raise RuntimeError(
@@ -315,6 +319,10 @@ class CMDBClient:
                 break
     
             all_records.extend(records)
-            start += 1000
+    
+            if len(records) < limit:
+                break  # last page, no need for another request
+    
+            offset += limit
     
         return all_records
