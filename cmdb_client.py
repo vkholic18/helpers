@@ -167,7 +167,7 @@ class CMDBClient:
                     "vlan": "0",
                     "ip": record["ip"],
                     "type": "BEN",
-                    "mac": "FF:FF:FF:FF:FF:FF",
+                    "mac": record.get("mac_address", ""),
                 }
             ]
 
@@ -189,7 +189,8 @@ class CMDBClient:
                 "u_additional_owners": record.get("additional_owners", ""),
                 "u_business_unit": record.get("business_unit", ""),
                 "u_application": record.get("app_name", ""),
-                "u_component": record.get("u_component", ""),
+                "u_component": record.get("u_component") or record.get("component", ""),
+                "u_os": record.get("os", ""),
                 "u_role": record.get("role", ""),
                 "u_management_ip_address": record.get("ip", ""),
                 "u_network_adapters": json.dumps(network_adapter),
@@ -262,55 +263,49 @@ class CMDBClient:
     def fetch_cmdb_server_list_paginated(
         self,
         c_code: Optional[str] = None,
+        dns_domain: Optional[str] = None,
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 500,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch ALL server records from CMDB (Live only).
-        Uses sysparm_start pagination to retrieve beyond the 1000-record API limit.
+        Fetch paginated server records from CMDB (Live only).
+        Serverless-safe: returns one page only.
+        Does NOT affect existing Pre-live logic.
         """
+
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
         }
+
         effective_c_code = c_code or IC4VMWS_UC_CODE
         base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
+
+        if dns_domain:
+            base_query += f"^u_dns_domain={dns_domain}"
+
         if hostname:
             base_query += f"^name={hostname}"
         if serial_number:
             base_query += f"^serial_number={serial_number}"
-    
+
         params = {
             "sysparm_query": base_query,
+            "sysparm_limit": limit,
+            "sysparm_offset": offset,
             "sysparm_table": "cmdb_ci_server",
-            "sysparm_display_value": "true",
-            "sysparm_limit": 1000,
         }
-    
-        all_records = []
-        start = 0
-    
-        while True:
-            params["sysparm_start"] = start
-            response = requests.get(
-                self.CMDB_GETCI_PROD_API_URL,
-                headers=headers,
-                params=params,
-                timeout=60,
-            )
-    
-            if response.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to fetch CMDB records. "
-                    f"Status: {response.status_code}, Response: {response.text}"
-                )
-    
-            records = response.json().get("result", [])
-            if not records:
-                break
-    
-            all_records.extend(records)
-            start += 1000
-    
-        return all_records
+
+        response = requests.get(
+            self.CMDB_GETCI_PROD_API_URL,
+            headers=headers,
+            params=params,
+            timeout=60,
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        return data.get("result", [])
