@@ -266,46 +266,55 @@ class CMDBClient:
         dns_domain: Optional[str] = None,
         hostname: Optional[str] = None,
         serial_number: Optional[str] = None,
-        offset: int = 0,
-        limit: int = 500,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch paginated server records from CMDB (Live only).
-        Serverless-safe: returns one page only.
-        Does NOT affect existing Pre-live logic.
+        Fetch ALL server records from CMDB (Live only).
+        Uses sysparm_start pagination to retrieve beyond the 1000-record API limit.
         """
-
         headers = {
             "Authorization": f"Bearer {self.CMDB_ACCESS_TOKEN}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
-
         effective_c_code = c_code or IC4VMWS_UC_CODE
         base_query = f"u_c_code={effective_c_code}^u_dcim_status=Live"
-
         if dns_domain:
             base_query += f"^u_dns_domain={dns_domain}"
-
         if hostname:
             base_query += f"^name={hostname}"
         if serial_number:
             base_query += f"^serial_number={serial_number}"
-
+    
         params = {
             "sysparm_query": base_query,
-            "sysparm_limit": limit,
-            "sysparm_offset": offset,
             "sysparm_table": "cmdb_ci_server",
+            "sysparm_display_value": "true",
+            "sysparm_limit": 1000,
         }
-
-        response = requests.get(
-            self.CMDB_GETCI_PROD_API_URL,
-            headers=headers,
-            params=params,
-            timeout=60,
-        )
-
-        response.raise_for_status()
-        data = response.json()
-
-        return data.get("result", [])
+    
+        all_records = []
+        start = 0
+    
+        while True:
+            params["sysparm_start"] = start
+            response = requests.get(
+                self.CMDB_GETCI_PROD_API_URL,
+                headers=headers,
+                params=params,
+                timeout=60,
+            )
+    
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Failed to fetch CMDB records. "
+                    f"Status: {response.status_code}, Response: {response.text}"
+                )
+    
+            records = response.json().get("result", [])
+            if not records:
+                break
+    
+            all_records.extend(records)
+            start += 1000
+    
+        return all_records
