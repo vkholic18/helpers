@@ -202,6 +202,7 @@ def evaluate_org_compliance(org_data):
         },
         "recommended": {
             "repo_creation_private_only": check_repo_creation_private(org_data),
+            "integration_requests_disabled": check_integration_requests_disabled(org_data),
             "visibility_change_disabled": check_visibility_change_disabled(org_data),
             "delete_transfer_disabled": check_delete_transfer_disabled(org_data),
             "profile_name_visible": check_profile_name_visibility(org_data),
@@ -427,6 +428,9 @@ def get_org_failure_reasons(org_checks):
     if not recommended.get("repo_creation_private_only", True):
         failed_rules.append("repo_creation_private_only")
         reasons.append("Members can create public repositories.")
+    if not recommended.get("integration_requests_disabled", True):
+        failed_rules.append("integration_requests_disabled")
+        reasons.append("Integration requests from outside collaborators are allowed.")
     if not recommended.get("visibility_change_disabled", True):
         failed_rules.append("visibility_change_disabled")
         reasons.append("Members can change repository visibility.")
