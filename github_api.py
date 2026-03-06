@@ -6,17 +6,28 @@ from datetime import datetime, timedelta, timezone
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-TOKEN = os.getenv("GITHUB_TOKEN")
-ORG = os.getenv("GITHUB_ORG")
-BASE = os.getenv("GITHUB_BASE")
+# =============================================================================
+# TEST MODE - Using sample data (comment this section and uncomment below for production)
+# =============================================================================
+TEST_MODE = True
 
-if not all([TOKEN, ORG, BASE]):
-    raise RuntimeError("Missing required environment variables: GITHUB_TOKEN, GITHUB_ORG, GITHUB_BASE")
+# TOKEN = os.getenv("GITHUB_TOKEN")
+# ORG = os.getenv("GITHUB_ORG")
+# BASE = os.getenv("GITHUB_BASE")
+# 
+# if not all([TOKEN, ORG, BASE]):
+#     raise RuntimeError("Missing required environment variables: GITHUB_TOKEN, GITHUB_ORG, GITHUB_BASE")
+# 
+# HEADERS = {
+#     "Authorization": f"token {TOKEN}",
+#     "Accept": "application/vnd.github+json"
+# }
 
-HEADERS = {
-    "Authorization": f"token {TOKEN}",
-    "Accept": "application/vnd.github+json"
-}
+# Test mode variables
+TOKEN = "test_token"
+ORG = "TestOrganization"
+BASE = "https://api.github.example.com"
+HEADERS = {"Authorization": f"token {TOKEN}", "Accept": "application/vnd.github+json"}
 
 SLEEP = 0.3
 
@@ -732,69 +743,214 @@ def generate_excel_report(org, summary, org_checks, results):
 def main():
     print(f"Scanning org: {ORG}  (base: {BASE})\n")
     
-    # Organization-level compliance check
-    print("Checking organization-level compliance...")
-    org_data = get_org_settings()
-    org_checks = evaluate_org_compliance(org_data)
-    org_compliant = is_org_compliant(org_checks)
-    print(f"Organization compliance: {'PASS' if org_compliant else 'FAIL'}\n")
-    
-    # Repository-level compliance checks
-    repos = get_repositories()
-    print(f"Found {len(repos)} non-archived repositories.\n")
-
-    results = []
-    summary = {
-        "total_repos": len(repos), 
-        "fully_compliant": 0, 
-        "non_compliant": 0,
-        "org_compliant": org_compliant
-    }
-
-    for repo in repos:
-        name            = repo["name"]
-        default_branch  = repo["default_branch"]
-        is_private      = check_repo_visibility(repo)
-        metadata_exists = check_metadata_file(name, default_branch)
-        outside_collabs = check_collaborators(name)
-        bad_hooks       = check_hooks(name)
-        protection      = get_branch_protection(name, default_branch)
-        bp_checks       = evaluate_branch_protection(protection)
-        compliant       = (
-            is_private
-            and metadata_exists
-            and len(outside_collabs) == 0
-            and len(bad_hooks) == 0
-            and is_compliant(bp_checks)
-        )
-
-        if compliant:
-            summary["fully_compliant"] += 1
-        else:
-            summary["non_compliant"] += 1
-
-        results.append({
-            "repository":            name,
-            "default_branch":        default_branch,
-            "fully_compliant":       compliant,
-
-            # Repository-level findings (Auditree naming)
-            "repo_checks": {
-                # Auditree: private_if_sensitive
-                "private_if_sensitive":     is_private,
-                # Auditree: metadata_existing
-                "metadata_existing":        metadata_exists,
-                # Auditree: collaborators_in_org
-                "collaborators_in_org":     len(outside_collabs) == 0,
-                "outside_collaborators":    outside_collabs,   # list; empty = good
-                # Auditree: unsecure_hooks
-                "unsecure_hooks":           len(bad_hooks) == 0,
-                "hooks_with_ssl_disabled":  bad_hooks,         # list; empty = good
+    if TEST_MODE:
+        print("*** RUNNING IN TEST MODE WITH SAMPLE DATA ***\n")
+        
+        # Sample organization checks data
+        org_checks = {
+            "required": {
+                "default_repository_permission": False,  # FAIL
+                "org_outside_collaborators": True,       # PASS
+                "unsecure_org_hooks": True,              # PASS
+                "unsecure_org_hooks_list": [],
             },
+            "recommended": {
+                "members_can_create_public_repositories": False,  # FAIL
+                "integration_requests_disabled": True,            # PASS
+                "visibility_change_disabled": False,              # FAIL
+                "delete_transfer_disabled": True,                 # PASS
+                "profile_name_visible": True,                     # PASS
+                "team_creation_disabled": False,                  # FAIL
+                "admin_activity_6_months": False,                 # FAIL
+                "inactive_admins": ["john.doe", "jane.smith"],
+                "admin_activity_details": [
+                    {"login": "john.doe", "has_recent_activity": False},
+                    {"login": "jane.smith", "has_recent_activity": False},
+                    {"login": "active.admin", "has_recent_activity": True},
+                ],
+            }
+        }
+        org_compliant = False  # Because default_repository_permission fails
+        
+        # Sample repository results
+        results = [
+            {
+                "repository": "frontend-app",
+                "default_branch": "main",
+                "fully_compliant": False,
+                "repo_checks": {
+                    "private_if_sensitive": True,
+                    "metadata_existing": False,  # FAIL
+                    "collaborators_in_org": True,
+                    "outside_collaborators": [],
+                    "unsecure_hooks": True,
+                    "hooks_with_ssl_disabled": [],
+                },
+                "branch_protection_checks": {
+                    "needed_protection": True,
+                    "required_pr_review": True,
+                    "approvers_count": True,
+                    "dismiss_stale": False,  # FAIL
+                    "code_owners_review": False,  # FAIL
+                    "require_last_push_approval": False,  # FAIL
+                    "not_bypass": True,
+                },
+            },
+            {
+                "repository": "backend-api",
+                "default_branch": "main",
+                "fully_compliant": True,
+                "repo_checks": {
+                    "private_if_sensitive": True,
+                    "metadata_existing": True,
+                    "collaborators_in_org": True,
+                    "outside_collaborators": [],
+                    "unsecure_hooks": True,
+                    "hooks_with_ssl_disabled": [],
+                },
+                "branch_protection_checks": {
+                    "needed_protection": True,
+                    "required_pr_review": True,
+                    "approvers_count": True,
+                    "dismiss_stale": True,
+                    "code_owners_review": True,
+                    "require_last_push_approval": True,
+                    "not_bypass": True,
+                },
+            },
+            {
+                "repository": "data-pipeline",
+                "default_branch": "develop",
+                "fully_compliant": False,
+                "repo_checks": {
+                    "private_if_sensitive": False,  # FAIL - Public repo
+                    "metadata_existing": True,
+                    "collaborators_in_org": False,  # FAIL
+                    "outside_collaborators": ["external.user", "contractor123"],
+                    "unsecure_hooks": False,  # FAIL
+                    "hooks_with_ssl_disabled": [12345, 67890],
+                },
+                "branch_protection_checks": {
+                    "needed_protection": False,  # FAIL - No protection at all
+                    "required_pr_review": False,
+                    "approvers_count": False,
+                    "dismiss_stale": False,
+                    "code_owners_review": False,
+                    "require_last_push_approval": False,
+                    "not_bypass": False,
+                },
+            },
+            {
+                "repository": "internal-tools",
+                "default_branch": "master",
+                "fully_compliant": True,
+                "repo_checks": {
+                    "private_if_sensitive": True,
+                    "metadata_existing": True,
+                    "collaborators_in_org": True,
+                    "outside_collaborators": [],
+                    "unsecure_hooks": True,
+                    "hooks_with_ssl_disabled": [],
+                },
+                "branch_protection_checks": {
+                    "needed_protection": True,
+                    "required_pr_review": True,
+                    "approvers_count": True,
+                    "dismiss_stale": True,
+                    "code_owners_review": True,
+                    "require_last_push_approval": True,
+                    "not_bypass": True,
+                },
+            },
+            {
+                "repository": "mobile-app",
+                "default_branch": "main",
+                "fully_compliant": False,
+                "repo_checks": {
+                    "private_if_sensitive": True,
+                    "metadata_existing": True,
+                    "collaborators_in_org": True,
+                    "outside_collaborators": [],
+                    "unsecure_hooks": True,
+                    "hooks_with_ssl_disabled": [],
+                },
+                "branch_protection_checks": {
+                    "needed_protection": True,
+                    "required_pr_review": True,
+                    "approvers_count": False,  # FAIL - 0 approvers
+                    "dismiss_stale": True,
+                    "code_owners_review": True,
+                    "require_last_push_approval": True,
+                    "not_bypass": False,  # FAIL - bypass allowed
+                },
+            },
+        ]
+        
+        summary = {
+            "total_repos": len(results),
+            "fully_compliant": sum(1 for r in results if r["fully_compliant"]),
+            "non_compliant": sum(1 for r in results if not r["fully_compliant"]),
+            "org_compliant": org_compliant
+        }
+        
+        print(f"Organization compliance: {'PASS' if org_compliant else 'FAIL'}\n")
+        print(f"Found {summary['total_repos']} repositories (sample data).\n")
+        
+    else:
+        # Production mode - actual API calls
+        print("Checking organization-level compliance...")
+        org_data = get_org_settings()
+        org_checks = evaluate_org_compliance(org_data)
+        org_compliant = is_org_compliant(org_checks)
+        print(f"Organization compliance: {'PASS' if org_compliant else 'FAIL'}\n")
+        
+        repos = get_repositories()
+        print(f"Found {len(repos)} non-archived repositories.\n")
 
-            # Branch-protection findings (Auditree naming)
-            "branch_protection_checks": bp_checks,
-        })
+        results = []
+        summary = {
+            "total_repos": len(repos), 
+            "fully_compliant": 0, 
+            "non_compliant": 0,
+            "org_compliant": org_compliant
+        }
+
+        for repo in repos:
+            name            = repo["name"]
+            default_branch  = repo["default_branch"]
+            is_private      = check_repo_visibility(repo)
+            metadata_exists = check_metadata_file(name, default_branch)
+            outside_collabs = check_collaborators(name)
+            bad_hooks       = check_hooks(name)
+            protection      = get_branch_protection(name, default_branch)
+            bp_checks       = evaluate_branch_protection(protection)
+            compliant       = (
+                is_private
+                and metadata_exists
+                and len(outside_collabs) == 0
+                and len(bad_hooks) == 0
+                and is_compliant(bp_checks)
+            )
+
+            if compliant:
+                summary["fully_compliant"] += 1
+            else:
+                summary["non_compliant"] += 1
+
+            results.append({
+                "repository":            name,
+                "default_branch":        default_branch,
+                "fully_compliant":       compliant,
+                "repo_checks": {
+                    "private_if_sensitive":     is_private,
+                    "metadata_existing":        metadata_exists,
+                    "collaborators_in_org":     len(outside_collabs) == 0,
+                    "outside_collaborators":    outside_collabs,
+                    "unsecure_hooks":           len(bad_hooks) == 0,
+                    "hooks_with_ssl_disabled":  bad_hooks,
+                },
+                "branch_protection_checks": bp_checks,
+            })
 
     # Generate JSON output
     output = {
