@@ -153,7 +153,7 @@ class GitHubAPIClient:
     def get(self, endpoint, allow_404=False):
         """Make a GET request to the GitHub API."""
         url = f"{self.base_url}{endpoint}"
-        response = requests.get(url, headers=self.headers)
+        response = requests.get(url, headers=self.headers, verify=False)
         
         if response.status_code == 404 and allow_404:
             return None
@@ -167,7 +167,7 @@ class GitHubAPIClient:
         url = f"{self.base_url}{endpoint}"
         
         while url:
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, verify=False)
             response.raise_for_status()
             data = response.json()
             
@@ -1210,9 +1210,9 @@ def main():
     print(f"  Required Failed: {summary['required_failed']}")
     
     if summary['required_failed'] > 0:
-        print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review required rules!")
+        print("\n   COMPLIANCE ISSUES DETECTED - Review required rules!")
     else:
-        print("\n  ✅ All required branch protection rules passed!")
+        print("\n  All required branch protection rules passed!")
     
     print("\n" + "=" * 60)
 
