@@ -5,6 +5,7 @@ BRANCH PROTECTION COMPLIANCE CHECKER
 
 This script checks branch protection settings against IBM CISO policy requirements.
 Checks ALL branches in ALL repositories within the organization.
+Can also APPLY compliant settings and ROLLBACK changes if needed.
 
 HOW TO RUN:
     1. Set environment variables:
@@ -12,12 +13,22 @@ HOW TO RUN:
        - GITHUB_ORG: Organization name to check
        - GITHUB_BASE: GitHub API base URL (e.g., https://api.github.example.com)
     
-    2. Run: python branch_compliance.py
+    2. Run in CHECK mode (report only - default):
+       python branch_compliance.py --check
+       python branch_compliance.py  # same as --check
     
-    3. Output files will be generated:
+    3. Run in APPLY mode (fix non-compliant settings):
+       python branch_compliance.py --apply
+       python branch_compliance.py --apply --dry-run  # preview changes without applying
+    
+    4. Run in ROLLBACK mode (revert to previous settings):
+       python branch_compliance.py --rollback backup_2024-01-15_120000.json
+    
+    5. Output files will be generated:
        - branch_compliance_report.json
        - branch_compliance_report.md
        - branch_compliance_report.xlsx
+       - backup_TIMESTAMP.json (when using --apply)
 
 RULES CHECKED (Reference: IBM Cloud Policy 3.4.1, 3.1.1, 3.1.2):
 
@@ -109,8 +120,13 @@ import sys
 import json
 import time
 import base64
+import argparse
 import requests
+import urllib3
 from datetime import datetime, timezone
+
+# Suppress SSL warnings when using verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Excel support
 import openpyxl
@@ -186,6 +202,56 @@ class GitHubAPIClient:
             time.sleep(SLEEP_INTERVAL)
         
         return results
+    
+    def put(self, endpoint, data):
+        """
+        Make a PUT request to the GitHub API.
+        
+        Used for updating branch protection settings.
+        
+        Args:
+            endpoint: API endpoint path
+            data: JSON data to send
+        
+        Returns:
+            dict: Response JSON
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.put(url, headers=self.headers, json=data, verify=False)
+        response.raise_for_status()
+        return response.json()
+    
+    def delete(self, endpoint):
+        """
+        Make a DELETE request to the GitHub API.
+        
+        Used for removing branch protection (for rollback to 'no protection' state).
+        
+        Args:
+            endpoint: API endpoint path
+        
+        Returns:
+            bool: True if successful
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.delete(url, headers=self.headers, verify=False)
+        response.raise_for_status()
+        return True
+    
+    def post_admin(self, endpoint):
+        """
+        Make a POST request to enable admin enforcement.
+        
+        Args:
+            endpoint: API endpoint path
+        
+        Returns:
+            dict: Response JSON
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.post(url, headers=self.headers, verify=False)
+        response.raise_for_status()
+        return response.json()
 
 
 # =============================================================================
@@ -1160,11 +1226,495 @@ class ReportGenerator:
 
 
 # =============================================================================
+# BRANCH PROTECTION APPLIER
+# =============================================================================
+
+class BranchProtectionApplier:
+    """
+    Applies compliant branch protection settings to repositories.
+    Supports backup before changes and rollback if needed.
+    
+    APPLY MODE:
+    -----------
+    1. Fetch current protection settings for all branches
+    2. Save backup to backup_TIMESTAMP.json
+    3. Apply compliant settings to non-compliant branches
+    4. Generate report of changes made
+    
+    ROLLBACK MODE:
+    --------------
+    1. Read backup file
+    2. Restore original protection settings
+    3. Report what was restored
+    """
+    
+    def __init__(self, api_client, org_name, dry_run=False):
+        self.api = api_client
+        self.org = org_name
+        self.dry_run = dry_run
+        self.changes_made = []
+        self.errors = []
+    
+    def get_compliant_protection_payload(self, existing_protection=None):
+        """
+        Build the API payload for compliant branch protection settings.
+        
+        Preserves existing settings where appropriate (like status checks)
+        while ensuring required settings are compliant.
+        
+        API: PUT /repos/{org}/{repo}/branches/{branch}/protection
+        
+        Returns:
+            dict: Protection settings payload for GitHub API
+        """
+        # Start with existing status checks if any (preserve CI/CD settings)
+        existing_status_checks = None
+        if existing_protection:
+            existing_status_checks = existing_protection.get("required_status_checks")
+        
+        payload = {
+            # REQUIRED: Pull Request Reviews
+            "required_pull_request_reviews": {
+                "dismiss_stale_reviews": True,                    # Rule: dismiss_stale
+                "require_code_owner_reviews": True,               # Rule: code_owners_review
+                "required_approving_review_count": 1,             # Rule: approvers_count
+                "require_last_push_approval": True                # Rule: require_last_push_approval
+            },
+            
+            # REQUIRED: Enforce for administrators (no bypass)
+            "enforce_admins": True,                               # Rule: not_bypass
+            
+            # RECOMMENDED: Conversation resolution
+            "required_conversation_resolution": True,             # Rule: conversation_resolution
+            
+            # Preserve existing status checks or set minimal config
+            "required_status_checks": existing_status_checks if existing_status_checks else {
+                "strict": True,                                   # Rule: branch_uptodate
+                "checks": []                                      # Preserve existing or empty
+            },
+            
+            # Allow force pushes and deletions - typically should be disabled
+            "allow_force_pushes": False,
+            "allow_deletions": False,
+            
+            # Required for API - restrictions on who can push
+            "restrictions": None
+        }
+        
+        return payload
+    
+    def backup_current_settings(self, checker_results):
+        """
+        Save current branch protection settings to backup file.
+        
+        Backup format:
+        {
+            "timestamp": "2024-01-15T12:00:00",
+            "organization": "org-name",
+            "branches": [
+                {
+                    "repository": "repo-name",
+                    "branch": "main",
+                    "had_protection": true,
+                    "protection_settings": {...}  # Raw API response or null
+                }
+            ]
+        }
+        
+        Returns:
+            str: Path to backup file
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        backup_file = f"backup_{timestamp}.json"
+        
+        backup_data = {
+            "timestamp": datetime.now().isoformat(),
+            "organization": self.org,
+            "branches": []
+        }
+        
+        print("\n  Creating backup of current settings...")
+        
+        for repo_result in checker_results:
+            repo_name = repo_result["repository"]
+            
+            for branch_result in repo_result["branches"]:
+                branch_name = branch_result["branch"]
+                
+                # Fetch current protection settings
+                protection = self.api.get(
+                    f"/repos/{self.org}/{repo_name}/branches/{branch_name}/protection",
+                    allow_404=True
+                )
+                time.sleep(SLEEP_INTERVAL)
+                
+                backup_data["branches"].append({
+                    "repository": repo_name,
+                    "branch": branch_name,
+                    "had_protection": protection is not None,
+                    "protection_settings": protection
+                })
+        
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, indent=2, default=str)
+        
+        print(f"    Backup saved: {backup_file}")
+        print(f"    Backed up {len(backup_data['branches'])} branch configurations")
+        
+        return backup_file
+    
+    def apply_protection(self, repo_name, branch_name, existing_protection=None):
+        """
+        Apply compliant branch protection settings to a single branch.
+        
+        API: PUT /repos/{org}/{repo}/branches/{branch}/protection
+        
+        Args:
+            repo_name: Repository name
+            branch_name: Branch name
+            existing_protection: Current protection settings (to preserve some values)
+        
+        Returns:
+            dict: Result with success status and details
+        """
+        endpoint = f"/repos/{self.org}/{repo_name}/branches/{branch_name}/protection"
+        payload = self.get_compliant_protection_payload(existing_protection)
+        
+        if self.dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "repository": repo_name,
+                "branch": branch_name,
+                "action": "Would apply compliant settings"
+            }
+        
+        try:
+            self.api.put(endpoint, payload)
+            time.sleep(SLEEP_INTERVAL)
+            
+            return {
+                "success": True,
+                "repository": repo_name,
+                "branch": branch_name,
+                "action": "Applied compliant settings"
+            }
+        except requests.exceptions.HTTPError as e:
+            return {
+                "success": False,
+                "repository": repo_name,
+                "branch": branch_name,
+                "error": str(e)
+            }
+    
+    def apply_all(self, checker_results):
+        """
+        Apply compliant settings to all non-compliant branches.
+        
+        Process:
+        1. Create backup of current settings
+        2. Identify branches with failed REQUIRED rules
+        3. Apply compliant settings to those branches
+        4. Report results
+        
+        Args:
+            checker_results: Results from BranchComplianceChecker.run_all_checks()
+        
+        Returns:
+            dict: Summary of changes made
+        """
+        print("\n" + "=" * 60)
+        print("APPLYING BRANCH PROTECTION RULES")
+        print("=" * 60)
+        
+        if self.dry_run:
+            print("\n  *** DRY RUN MODE - No changes will be made ***\n")
+        
+        # Step 1: Create backup
+        backup_file = self.backup_current_settings(checker_results)
+        
+        # Step 2: Find non-compliant branches
+        print("\n  Identifying non-compliant branches...")
+        non_compliant = []
+        
+        for repo_result in checker_results:
+            repo_name = repo_result["repository"]
+            
+            for branch_result in repo_result["branches"]:
+                branch_name = branch_result["branch"]
+                
+                # Check if any REQUIRED rules failed
+                required_failed = any(
+                    not rule["passed"] and rule["enforcement"] == "Required"
+                    for rule in branch_result["rules"]
+                )
+                
+                if required_failed:
+                    non_compliant.append({
+                        "repository": repo_name,
+                        "branch": branch_name,
+                        "has_protection": branch_result["has_protection"],
+                        "failed_rules": [
+                            rule["rule"] for rule in branch_result["rules"]
+                            if not rule["passed"] and rule["enforcement"] == "Required"
+                        ]
+                    })
+        
+        print(f"    Found {len(non_compliant)} non-compliant branches")
+        
+        if not non_compliant:
+            print("\n  All branches are compliant! No changes needed.")
+            return {
+                "backup_file": backup_file,
+                "total_checked": sum(len(r["branches"]) for r in checker_results),
+                "changes_made": 0,
+                "errors": 0
+            }
+        
+        # Step 3: Apply compliant settings
+        print("\n  Applying compliant settings...")
+        
+        for item in non_compliant:
+            repo_name = item["repository"]
+            branch_name = item["branch"]
+            
+            print(f"    {repo_name}/{branch_name}: ", end="")
+            
+            # Get existing protection to preserve some settings
+            existing = self.api.get(
+                f"/repos/{self.org}/{repo_name}/branches/{branch_name}/protection",
+                allow_404=True
+            )
+            
+            result = self.apply_protection(repo_name, branch_name, existing)
+            
+            if result["success"]:
+                self.changes_made.append(result)
+                if self.dry_run:
+                    print("Would apply")
+                else:
+                    print("Applied ✓")
+            else:
+                self.errors.append(result)
+                print(f"ERROR: {result.get('error', 'Unknown error')}")
+            
+            time.sleep(SLEEP_INTERVAL)
+        
+        # Summary
+        print("\n" + "-" * 40)
+        print("APPLY SUMMARY")
+        print("-" * 40)
+        print(f"  Backup file: {backup_file}")
+        print(f"  Branches processed: {len(non_compliant)}")
+        print(f"  Successfully applied: {len(self.changes_made)}")
+        print(f"  Errors: {len(self.errors)}")
+        
+        if self.dry_run:
+            print("\n  *** DRY RUN - No actual changes were made ***")
+            print(f"  Run without --dry-run to apply {len(self.changes_made)} changes")
+        
+        return {
+            "backup_file": backup_file,
+            "total_checked": sum(len(r["branches"]) for r in checker_results),
+            "branches_processed": len(non_compliant),
+            "changes_made": len(self.changes_made),
+            "errors": len(self.errors),
+            "dry_run": self.dry_run
+        }
+
+
+# =============================================================================
+# ROLLBACK FUNCTIONALITY
+# =============================================================================
+
+def rollback_from_backup(api_client, backup_file):
+    """
+    Restore branch protection settings from a backup file.
+    
+    Process:
+    1. Read backup file
+    2. For each branch in backup:
+       - If had_protection was True: restore those settings
+       - If had_protection was False: remove protection
+    
+    Args:
+        api_client: GitHubAPIClient instance
+        backup_file: Path to backup JSON file
+    
+    Returns:
+        dict: Summary of rollback results
+    """
+    print("\n" + "=" * 60)
+    print("ROLLING BACK FROM BACKUP")
+    print("=" * 60)
+    
+    # Read backup file
+    with open(backup_file, "r", encoding="utf-8") as f:
+        backup_data = json.load(f)
+    
+    org = backup_data["organization"]
+    branches = backup_data["branches"]
+    
+    print(f"\n  Backup from: {backup_data['timestamp']}")
+    print(f"  Organization: {org}")
+    print(f"  Branches to restore: {len(branches)}")
+    
+    restored = 0
+    removed = 0
+    errors = []
+    
+    print("\n  Restoring settings...")
+    
+    for item in branches:
+        repo_name = item["repository"]
+        branch_name = item["branch"]
+        had_protection = item["had_protection"]
+        protection_settings = item["protection_settings"]
+        
+        print(f"    {repo_name}/{branch_name}: ", end="")
+        
+        try:
+            if had_protection and protection_settings:
+                # Restore original protection settings
+                # Need to convert API response format to PUT request format
+                payload = convert_protection_response_to_payload(protection_settings)
+                api_client.put(
+                    f"/repos/{org}/{repo_name}/branches/{branch_name}/protection",
+                    payload
+                )
+                print("Restored ✓")
+                restored += 1
+            else:
+                # Remove protection entirely
+                api_client.delete(
+                    f"/repos/{org}/{repo_name}/branches/{branch_name}/protection"
+                )
+                print("Removed protection ✓")
+                removed += 1
+            
+            time.sleep(SLEEP_INTERVAL)
+            
+        except requests.exceptions.HTTPError as e:
+            print(f"ERROR: {e}")
+            errors.append({
+                "repository": repo_name,
+                "branch": branch_name,
+                "error": str(e)
+            })
+    
+    # Summary
+    print("\n" + "-" * 40)
+    print("ROLLBACK SUMMARY")
+    print("-" * 40)
+    print(f"  Settings restored: {restored}")
+    print(f"  Protection removed: {removed}")
+    print(f"  Errors: {len(errors)}")
+    
+    return {
+        "restored": restored,
+        "removed": removed,
+        "errors": len(errors),
+        "error_details": errors
+    }
+
+
+def convert_protection_response_to_payload(protection):
+    """
+    Convert GitHub API GET response format to PUT request format.
+    
+    The API response includes nested objects with URLs and metadata,
+    but the PUT request expects a simpler format.
+    
+    Args:
+        protection: Branch protection response from GET API
+    
+    Returns:
+        dict: Payload suitable for PUT request
+    """
+    pr_reviews = protection.get("required_pull_request_reviews") or {}
+    status_checks = protection.get("required_status_checks")
+    enforce_admins = protection.get("enforce_admins") or {}
+    conversation = protection.get("required_conversation_resolution") or {}
+    
+    payload = {
+        "required_pull_request_reviews": {
+            "dismiss_stale_reviews": pr_reviews.get("dismiss_stale_reviews", False),
+            "require_code_owner_reviews": pr_reviews.get("require_code_owner_reviews", False),
+            "required_approving_review_count": pr_reviews.get("required_approving_review_count", 0),
+            "require_last_push_approval": pr_reviews.get("require_last_push_approval", False)
+        } if pr_reviews else None,
+        
+        "enforce_admins": enforce_admins.get("enabled", False),
+        
+        "required_conversation_resolution": conversation.get("enabled", False),
+        
+        "required_status_checks": {
+            "strict": status_checks.get("strict", False) if status_checks else False,
+            "checks": status_checks.get("checks", []) if status_checks else []
+        } if status_checks else None,
+        
+        "allow_force_pushes": protection.get("allow_force_pushes", {}).get("enabled", False),
+        "allow_deletions": protection.get("allow_deletions", {}).get("enabled", False),
+        
+        "restrictions": None
+    }
+    
+    return payload
+
+
+# =============================================================================
+# COMMAND LINE INTERFACE
+# =============================================================================
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="GitHub Branch Protection Compliance Checker & Enforcer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --check              Check compliance (default, report only)
+  %(prog)s --apply              Apply compliant settings to non-compliant branches
+  %(prog)s --apply --dry-run    Preview changes without applying
+  %(prog)s --rollback backup.json  Restore settings from backup file
+        """
+    )
+    
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--check", "-c",
+        action="store_true",
+        default=True,
+        help="Check compliance and generate reports (default)"
+    )
+    mode_group.add_argument(
+        "--apply", "-a",
+        action="store_true",
+        help="Apply compliant settings to non-compliant branches"
+    )
+    mode_group.add_argument(
+        "--rollback", "-r",
+        metavar="BACKUP_FILE",
+        help="Rollback to settings from backup file"
+    )
+    
+    parser.add_argument(
+        "--dry-run", "-n",
+        action="store_true",
+        help="Preview changes without applying (use with --apply)"
+    )
+    
+    return parser.parse_args()
+
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
 def main():
     """Main entry point."""
+    args = parse_arguments()
+    
     print("\n" + "=" * 60)
     print("GHE BRANCH PROTECTION COMPLIANCE CHECKER")
     print("=" * 60)
@@ -1181,11 +1731,24 @@ def main():
     print(f"  Organization: {GITHUB_ORG}")
     print(f"  API Base URL: {GITHUB_BASE}")
     
-    # Initialize
+    # Initialize API client
     api_client = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
-    checker = BranchComplianceChecker(api_client, GITHUB_ORG)
     
-    # Run checks
+    # Handle ROLLBACK mode
+    if args.rollback:
+        print(f"  Mode: ROLLBACK from {args.rollback}")
+        rollback_from_backup(api_client, args.rollback)
+        print("\n" + "=" * 60)
+        return
+    
+    # Handle CHECK and APPLY modes (both need to run checks first)
+    if args.apply:
+        print(f"  Mode: APPLY {'(DRY RUN)' if args.dry_run else ''}")
+    else:
+        print(f"  Mode: CHECK (report only)")
+    
+    # Initialize checker and run checks
+    checker = BranchComplianceChecker(api_client, GITHUB_ORG)
     results = checker.run_all_checks()
     
     if not results:
@@ -1200,7 +1763,7 @@ def main():
     summary = report_gen._calculate_summary()
     
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print("CHECK SUMMARY")
     print("=" * 60)
     print(f"  Repositories Checked: {summary['total_repositories']}")
     print(f"  Total Branches Checked: {summary['total_branches']}")
@@ -1210,9 +1773,30 @@ def main():
     print(f"  Required Failed: {summary['required_failed']}")
     
     if summary['required_failed'] > 0:
-        print("\n   COMPLIANCE ISSUES DETECTED - Review required rules!")
+        print("\n    COMPLIANCE ISSUES DETECTED - Review required rules!")
     else:
-        print("\n  All required branch protection rules passed!")
+        print("\n   All required branch protection rules passed!")
+    
+    # Handle APPLY mode
+    if args.apply:
+        if summary['required_failed'] == 0:
+            print("\n  No compliance issues to fix.")
+        else:
+            applier = BranchProtectionApplier(api_client, GITHUB_ORG, dry_run=args.dry_run)
+            apply_result = applier.apply_all(results)
+            
+            # Save apply results to file
+            apply_log_file = f"apply_log_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+            with open(apply_log_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "timestamp": datetime.now().isoformat(),
+                    "organization": GITHUB_ORG,
+                    "dry_run": args.dry_run,
+                    "summary": apply_result,
+                    "changes": applier.changes_made,
+                    "errors": applier.errors
+                }, f, indent=2, default=str)
+            print(f"\n  Apply log saved: {apply_log_file}")
     
     print("\n" + "=" * 60)
 
