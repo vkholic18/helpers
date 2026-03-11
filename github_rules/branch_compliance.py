@@ -4,7 +4,7 @@ BRANCH PROTECTION COMPLIANCE CHECKER
 ================================================================================
 
 This script checks branch protection settings against IBM CISO policy requirements.
-Only applies to repositories with production code and their production branches.
+Checks ALL branches in ALL repositories within the organization.
 
 HOW TO RUN:
     1. Set environment variables:
@@ -278,29 +278,26 @@ class BranchComplianceChecker:
         
         return True
     
-    def get_production_branches(self, metadata):
+    def get_all_branches(self, repo_name):
         """
-        Get list of production branches from metadata.
+        Fetch ALL branches from a repository.
         
-        HOW WE DETERMINE PRODUCTION BRANCHES:
-        -------------------------------------
-        1. Read production_branches field from .metadata
-        2. Can be a string (single branch) or list (multiple branches)
-        3. If not specified, defaults to ["main"] 
-        4. These are the branches that need protection
+        HOW WE FETCH ALL BRANCHES:
+        --------------------------
+        1. Call GET /repos/{org}/{repo}/branches?per_page=100
+        2. Handle pagination to get all branches
+        3. Return list of all branch names
+        
+        API Endpoint: GET /repos/{org}/{repo}/branches
         
         Returns:
-            list: Branch names that contain production code
+            list: All branch names in the repository
         """
-        if not metadata:
-            return ["main"]
+        branches_data = self.api.paginate(f"/repos/{self.org}/{repo_name}/branches?per_page=100")
+        time.sleep(SLEEP_INTERVAL)
         
-        branches = metadata.get("production_branches", ["main"])
-        
-        if isinstance(branches, str):
-            branches = [branches]
-        
-        return branches if branches else ["main"]
+        branch_names = [b["name"] for b in branches_data]
+        return branch_names
     
     def get_branch_protection(self, repo_name, branch):
         """
@@ -882,28 +879,28 @@ class BranchComplianceChecker:
     
     def check_repository(self, repo_data):
         """
-        Check all production branches in a repository.
+        Check ALL branches in a repository for branch protection compliance.
         
-        Returns dict with repository info and branch results.
+        HOW WE CHECK ALL BRANCHES:
+        --------------------------
+        1. Fetch ALL branches from repository via API
+        2. Check branch protection settings on EACH branch
+        3. Report compliance status for every branch
+        
+        Returns dict with repository info and all branch results.
         """
         repo_name = repo_data["name"]
         default_branch = repo_data.get("default_branch", "main")
         
-        # Fetch metadata
-        metadata = self.fetch_metadata(repo_name, default_branch)
-        
-        # Check if this is a production repository
-        if not self.is_production_repo(metadata):
-            return None  # Skip non-production repos
-        
         print(f"    Checking: {repo_name}")
         
-        # Get production branches
-        production_branches = self.get_production_branches(metadata)
+        # Get ALL branches in the repository
+        all_branches = self.get_all_branches(repo_name)
+        print(f"      Found {len(all_branches)} branches")
         
-        # Check each production branch
+        # Check each branch
         branch_results = []
-        for branch in production_branches:
+        for branch in all_branches:
             print(f"      Branch: {branch}")
             result = self.check_branch(repo_name, branch, default_branch)
             branch_results.append(result)
@@ -911,7 +908,7 @@ class BranchComplianceChecker:
         return {
             "repository": repo_name,
             "default_branch": default_branch,
-            "production_branches": production_branches,
+            "total_branches": len(all_branches),
             "branches": branch_results
         }
     
@@ -928,16 +925,15 @@ class BranchComplianceChecker:
         
         repos = self.get_repositories()
         
-        print(f"\n  Checking {len(repos)} repositories for production branches...")
+        print(f"\n  Checking ALL branches in {len(repos)} repositories...")
         
-        production_repos = 0
         for repo in repos:
             result = self.check_repository(repo)
             if result:
                 self.results.append(result)
-                production_repos += 1
         
-        print(f"\n  Found {production_repos} repositories with production code")
+        total_branches = sum(r["total_branches"] for r in self.results)
+        print(f"\n  Checked {total_branches} branches across {len(self.results)} repositories")
         
         return self.results
 
@@ -1013,8 +1009,8 @@ class ReportGenerator:
             "",
             "## Summary",
             "",
-            f"- **Production Repositories:** {summary['total_repositories']}",
-            f"- **Production Branches:** {summary['total_branches']}",
+            f"- **Repositories Checked:** {summary['total_repositories']}",
+            f"- **Total Branches Checked:** {summary['total_branches']}",
             f"- **Total Rules Checked:** {summary['total_rules_checked']}",
             f"- **Passed:** {summary['total_passed']}",
             f"- **Failed:** {summary['total_failed']}",
@@ -1027,7 +1023,7 @@ class ReportGenerator:
         for repo in self.results:
             lines.append(f"### {repo['repository']}")
             lines.append("")
-            lines.append(f"Production branches: {', '.join(repo['production_branches'])}")
+            lines.append(f"Total branches: {repo['total_branches']} (Default: `{repo['default_branch']}`)")
             lines.append("")
             
             for branch_result in repo["branches"]:
@@ -1193,8 +1189,7 @@ def main():
     results = checker.run_all_checks()
     
     if not results:
-        print("\n  No repositories with production code found.")
-        print("  Ensure repositories have .metadata with production_code: yes")
+        print("\n  No repositories found in organization.")
         return
     
     # Generate reports
@@ -1207,8 +1202,8 @@ def main():
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"  Production Repositories: {summary['total_repositories']}")
-    print(f"  Production Branches: {summary['total_branches']}")
+    print(f"  Repositories Checked: {summary['total_repositories']}")
+    print(f"  Total Branches Checked: {summary['total_branches']}")
     print(f"  Rules Checked: {summary['total_rules_checked']}")
     print(f"  Passed: {summary['total_passed']}")
     print(f"  Failed: {summary['total_failed']}")
