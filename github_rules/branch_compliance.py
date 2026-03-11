@@ -264,13 +264,28 @@ class BranchComplianceChecker:
     Only checks repositories with production code.
     """
     
-    def __init__(self, api_client, org_name):
+    def __init__(self, api_client, org_name, target_repo=None):
         self.api = api_client
         self.org = org_name
+        self.target_repo = target_repo
         self.results = []
     
     def get_repositories(self):
         """Fetch all non-archived repositories in the organization."""
+        # If targeting a specific repo, fetch just that one
+        if self.target_repo:
+            print(f"  Fetching specific repository: '{self.target_repo}'...")
+            repo_data = self.api.get(f"/repos/{self.org}/{self.target_repo}", allow_404=True)
+            if not repo_data:
+                print(f"    ERROR: Repository '{self.target_repo}' not found in {self.org}")
+                return []
+            if repo_data.get("archived", False):
+                print(f"    ERROR: Repository '{self.target_repo}' is archived")
+                return []
+            print(f"    Found repository: {self.target_repo}")
+            return [repo_data]
+        
+        # Otherwise fetch all repos
         print(f"  Fetching repositories for '{self.org}'...")
         repos = self.api.paginate(f"/orgs/{self.org}/repos?per_page=100")
         # Filter out archived repos - they can't be updated anyway
@@ -1674,8 +1689,10 @@ def parse_arguments():
         epilog="""
 Examples:
   %(prog)s --check              Check compliance (default, report only)
+  %(prog)s --repo my-repo       Check only a specific repository
   %(prog)s --apply              Apply compliant settings to non-compliant branches
   %(prog)s --apply --dry-run    Preview changes without applying
+  %(prog)s --repo my-repo --apply --dry-run   Test apply on one repo first
   %(prog)s --rollback backup.json  Restore settings from backup file
         """
     )
@@ -1704,6 +1721,12 @@ Examples:
         help="Preview changes without applying (use with --apply)"
     )
     
+    parser.add_argument(
+        "--repo",
+        metavar="REPO_NAME",
+        help="Target a specific repository (for testing before org-wide apply)"
+    )
+    
     return parser.parse_args()
 
 
@@ -1730,6 +1753,8 @@ def main():
     print(f"\nConfiguration:")
     print(f"  Organization: {GITHUB_ORG}")
     print(f"  API Base URL: {GITHUB_BASE}")
+    if args.repo:
+        print(f"  Target Repo: {args.repo}")
     
     # Initialize API client
     api_client = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
@@ -1748,7 +1773,7 @@ def main():
         print(f"  Mode: CHECK (report only)")
     
     # Initialize checker and run checks
-    checker = BranchComplianceChecker(api_client, GITHUB_ORG)
+    checker = BranchComplianceChecker(api_client, GITHUB_ORG, target_repo=args.repo)
     results = checker.run_all_checks()
     
     if not results:
@@ -1773,9 +1798,9 @@ def main():
     print(f"  Required Failed: {summary['required_failed']}")
     
     if summary['required_failed'] > 0:
-        print("\n    COMPLIANCE ISSUES DETECTED - Review required rules!")
+        print("\n  COMPLIANCE ISSUES DETECTED - Review required rules!")
     else:
-        print("\n   All required branch protection rules passed!")
+        print("\n  All required branch protection rules passed!")
     
     # Handle APPLY mode
     if args.apply:
