@@ -4,7 +4,14 @@ BRANCH PROTECTION COMPLIANCE CHECKER
 ================================================================================
 
 This script checks branch protection settings against IBM CISO policy requirements.
-Checks ALL branches in ALL repositories within the organization.
+Only checks repos where .metadata has production_code="yes" and only checks
+branches listed in production_branches array.
+
+FILTERING LOGIC (based on .metadata file):
+    - If production_code = "no" → SKIP repo
+    - If production_code = "yes" but production_branches = [] → SKIP repo
+    - If production_code = "yes" and production_branches = ["master"] → check only master
+
 Can also APPLY compliant settings and ROLLBACK changes if needed.
 
 HOW TO RUN:
@@ -960,36 +967,70 @@ class BranchComplianceChecker:
     
     def check_repository(self, repo_data):
         """
-        Check ALL branches in a repository for branch protection compliance.
+        Check production branches in a repository for branch protection compliance.
         
-        HOW WE CHECK ALL BRANCHES:
-        --------------------------
-        1. Fetch ALL branches from repository via API
-        2. Check branch protection settings on EACH branch
-        3. Report compliance status for every branch
+        FILTERING BASED ON .metadata FILE:
+        -----------------------------------
+        1. Fetch .metadata file from repository
+        2. If production_code = "no" → SKIP entire repo
+        3. If production_code = "yes" but production_branches is empty → SKIP repo
+        4. If production_code = "yes" and production_branches has values → check ONLY those branches
         
-        Returns dict with repository info and all branch results.
+        Returns dict with repository info and branch results, or None if skipped.
         """
         repo_name = repo_data["name"]
         default_branch = repo_data.get("default_branch", "main")
         
         print(f"    Checking: {repo_name}")
         
-        # Get ALL branches in the repository
-        all_branches = self.get_all_branches(repo_name)
-        print(f"      Found {len(all_branches)} branches")
+        # Fetch .metadata file
+        metadata = self.fetch_metadata(repo_name, default_branch)
         
-        # Check each branch
+        # Check production_code value
+        if not metadata:
+            print(f"      SKIP: No .metadata file found")
+            return None
+        
+        production_code = str(metadata.get("production_code", "no")).lower()
+        
+        if production_code != "yes":
+            print(f"      SKIP: production_code = '{production_code}' (not 'yes')")
+            return None
+        
+        # Get production_branches from metadata
+        production_branches = metadata.get("production_branches", [])
+        
+        # Ensure it's a list
+        if isinstance(production_branches, str):
+            production_branches = [production_branches] if production_branches.strip() else []
+        
+        # Skip if production_branches is empty
+        if not production_branches or production_branches == [""] or production_branches == [" "]:
+            print(f"      SKIP: production_code = 'yes' but production_branches is empty")
+            return None
+        
+        print(f"      production_code: yes")
+        print(f"      production_branches: {production_branches}")
+        
+        # Check ONLY the production branches
         branch_results = []
-        for branch in all_branches:
+        for branch in production_branches:
+            branch = branch.strip()
+            if not branch:
+                continue
             print(f"      Branch: {branch}")
             result = self.check_branch(repo_name, branch, default_branch)
             branch_results.append(result)
         
+        if not branch_results:
+            print(f"      SKIP: No valid production branches to check")
+            return None
+        
         return {
             "repository": repo_name,
             "default_branch": default_branch,
-            "total_branches": len(all_branches),
+            "total_branches": len(branch_results),
+            "production_branches": production_branches,
             "branches": branch_results
         }
     
@@ -1006,15 +1047,20 @@ class BranchComplianceChecker:
         
         repos = self.get_repositories()
         
-        print(f"\n  Checking ALL branches in {len(repos)} repositories...")
+        print(f"\n  Scanning {len(repos)} repositories...")
+        print(f"  (Only checking repos with production_code='yes' and production_branches defined)")
         
+        skipped_count = 0
         for repo in repos:
             result = self.check_repository(repo)
             if result:
                 self.results.append(result)
+            else:
+                skipped_count += 1
         
         total_branches = sum(r["total_branches"] for r in self.results)
-        print(f"\n  Checked {total_branches} branches across {len(self.results)} repositories")
+        print(f"\n  Checked {total_branches} production branches across {len(self.results)} production repositories")
+        print(f"  Skipped {skipped_count} repositories (no .metadata, production_code!=yes, or empty production_branches)")
         
         return self.results
 
@@ -1068,6 +1114,11 @@ class ReportGenerator:
             "report_type": "Branch Protection Compliance",
             "organization": self.org,
             "generated_at": self.timestamp,
+            "filtering_logic": {
+                "description": "Only repos with production_code=yes and non-empty production_branches",
+                "metadata_field_checked": "production_code",
+                "branches_field": "production_branches"
+            },
             "summary": summary,
             "repositories": self.results
         }
@@ -1088,10 +1139,19 @@ class ReportGenerator:
             f"**Organization:** {self.org}",
             f"**Generated:** {self.timestamp}",
             "",
+            "## Filtering Logic",
+            "",
+            "This report only includes repositories where:",
+            "- `.metadata` file exists",
+            "- `production_code` = \"yes\"",
+            "- `production_branches` array is not empty",
+            "",
+            "Only the branches listed in `production_branches` are checked.",
+            "",
             "## Summary",
             "",
-            f"- **Repositories Checked:** {summary['total_repositories']}",
-            f"- **Total Branches Checked:** {summary['total_branches']}",
+            f"- **Production Repositories Checked:** {summary['total_repositories']}",
+            f"- **Production Branches Checked:** {summary['total_branches']}",
             f"- **Total Rules Checked:** {summary['total_rules_checked']}",
             f"- **Passed:** {summary['total_passed']}",
             f"- **Failed:** {summary['total_failed']}",
@@ -1102,10 +1162,12 @@ class ReportGenerator:
         ]
         
         for repo in self.results:
+            prod_branches = repo.get('production_branches', [])
             lines.append(f"### {repo['repository']}")
             lines.append("")
-            lines.append(f"Total branches: {repo['total_branches']} (Default: `{repo['default_branch']}`)")
-            lines.append("")
+            lines.append(f"- **production_code:** yes")
+            lines.append(f"- **production_branches:** {prod_branches}")
+            lines.append(f"- **Default branch:** `{repo['default_branch']}`")
             
             for branch_result in repo["branches"]:
                 branch = branch_result["branch"]
@@ -1163,6 +1225,11 @@ class ReportGenerator:
             ["Organization", self.org],
             ["Generated", self.timestamp],
             ["", ""],
+            ["Filtering Logic:", ""],
+            ["  - Only repos with .metadata file", ""],
+            ["  - production_code = 'yes'", ""],
+            ["  - production_branches not empty", ""],
+            ["", ""],
             ["Production Repositories", summary["total_repositories"]],
             ["Production Branches", summary["total_branches"]],
             ["Total Rules Checked", summary["total_rules_checked"]],
@@ -1182,7 +1249,7 @@ class ReportGenerator:
         
         # Results Sheet
         ws2 = wb.create_sheet("Rule Results")
-        headers = ["Repository", "Branch", "Rule", "Status", "Enforcement", "Current Value", "Expected Value", "Reason"]
+        headers = ["Repository", "Production Branches", "Branch", "Rule", "Status", "Enforcement", "Current Value", "Expected Value", "Reason"]
         
         for col, header in enumerate(headers, 1):
             cell = ws2.cell(row=1, column=col, value=header)
@@ -1193,11 +1260,13 @@ class ReportGenerator:
         row_idx = 2
         for repo in self.results:
             repo_name = repo["repository"]
+            prod_branches = ", ".join(repo.get("production_branches", []))
             for branch_result in repo["branches"]:
                 branch_name = branch_result["branch"]
                 for rule in branch_result["rules"]:
                     values = [
                         repo_name,
+                        prod_branches,
                         branch_name,
                         rule["rule"],
                         "PASS" if rule["passed"] else "FAIL",
@@ -1209,7 +1278,7 @@ class ReportGenerator:
                     for col_idx, value in enumerate(values, 1):
                         cell = ws2.cell(row=row_idx, column=col_idx, value=value)
                         cell.border = thin_border
-                        if col_idx == 4:  # Status column
+                        if col_idx == 5:  # Status column (shifted by 1)
                             if rule["passed"]:
                                 cell.fill = pass_fill
                             elif rule["enforcement"] == "Required":
@@ -1219,14 +1288,15 @@ class ReportGenerator:
                     row_idx += 1
         
         # Adjust widths
-        ws2.column_dimensions['A'].width = 25
-        ws2.column_dimensions['B'].width = 15
-        ws2.column_dimensions['C'].width = 25
-        ws2.column_dimensions['D'].width = 10
-        ws2.column_dimensions['E'].width = 12
-        ws2.column_dimensions['F'].width = 30
-        ws2.column_dimensions['G'].width = 25
-        ws2.column_dimensions['H'].width = 60
+        ws2.column_dimensions['A'].width = 25  # Repository
+        ws2.column_dimensions['B'].width = 20  # Production Branches
+        ws2.column_dimensions['C'].width = 15  # Branch
+        ws2.column_dimensions['D'].width = 25  # Rule
+        ws2.column_dimensions['E'].width = 10  # Status
+        ws2.column_dimensions['F'].width = 12  # Enforcement
+        ws2.column_dimensions['G'].width = 30  # Current Value
+        ws2.column_dimensions['H'].width = 25  # Expected Value
+        ws2.column_dimensions['I'].width = 60  # Reason
         
         wb.save(filepath)
         print(f"  Excel report saved: {filepath}")
@@ -1798,9 +1868,9 @@ def main():
     print(f"  Required Failed: {summary['required_failed']}")
     
     if summary['required_failed'] > 0:
-        print("\n  COMPLIANCE ISSUES DETECTED - Review required rules!")
+        print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review required rules!")
     else:
-        print("\n  All required branch protection rules passed!")
+        print("\n  ✅ All required branch protection rules passed!")
     
     # Handle APPLY mode
     if args.apply:
