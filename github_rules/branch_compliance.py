@@ -1340,12 +1340,29 @@ class BranchProtectionApplier:
         self.changes_made = []
         self.errors = []
     
-    def get_compliant_protection_payload(self, existing_protection=None):
+    def check_codeowners_exists(self, repo_name, default_branch="main"):
+        """Check if CODEOWNERS file exists in the repository."""
+        locations = [
+            f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS?ref={default_branch}",
+            f"/repos/{self.org}/{repo_name}/contents/docs/CODEOWNERS?ref={default_branch}",
+            f"/repos/{self.org}/{repo_name}/contents/.github/CODEOWNERS?ref={default_branch}",
+        ]
+        for url in locations:
+            result = self.api.get(url, allow_404=True)
+            if result:
+                return True
+            time.sleep(SLEEP_INTERVAL)
+        return False
+    
+    def get_compliant_protection_payload(self, existing_protection=None, has_codeowners=True):
         """
         Build the API payload for compliant branch protection settings.
         
         Preserves existing settings where appropriate (like status checks)
         while ensuring required settings are compliant.
+        
+        NOTE: require_code_owner_reviews can only be True if CODEOWNERS file exists.
+              GitHub API returns 422 error otherwise.
         
         API: PUT /repos/{org}/{repo}/branches/{branch}/protection
         
@@ -1357,11 +1374,23 @@ class BranchProtectionApplier:
         if existing_protection:
             existing_status_checks = existing_protection.get("required_status_checks")
         
+        # Convert existing status checks to proper format if they exist
+        status_checks_payload = None
+        if existing_status_checks:
+            checks = existing_status_checks.get("checks", []) or existing_status_checks.get("contexts", [])
+            # Convert contexts (strings) to checks format if needed
+            if checks and isinstance(checks[0], str):
+                checks = [{"context": c} for c in checks]
+            status_checks_payload = {
+                "strict": existing_status_checks.get("strict", True),
+                "checks": checks
+            }
+        
         payload = {
             # REQUIRED: Pull Request Reviews
             "required_pull_request_reviews": {
                 "dismiss_stale_reviews": True,                    # Rule: dismiss_stale
-                "require_code_owner_reviews": True,               # Rule: code_owners_review
+                "require_code_owner_reviews": has_codeowners,     # Rule: code_owners_review (only if CODEOWNERS exists!)
                 "required_approving_review_count": 1,             # Rule: approvers_count
                 "require_last_push_approval": True                # Rule: require_last_push_approval
             },
@@ -1372,11 +1401,8 @@ class BranchProtectionApplier:
             # RECOMMENDED: Conversation resolution
             "required_conversation_resolution": True,             # Rule: conversation_resolution
             
-            # Preserve existing status checks or set minimal config
-            "required_status_checks": existing_status_checks if existing_status_checks else {
-                "strict": True,                                   # Rule: branch_uptodate
-                "checks": []                                      # Preserve existing or empty
-            },
+            # Preserve existing status checks (don't set if none exist to avoid issues)
+            "required_status_checks": status_checks_payload,
             
             # Allow force pushes and deletions - typically should be disabled
             "allow_force_pushes": False,
@@ -1448,7 +1474,7 @@ class BranchProtectionApplier:
         
         return backup_file
     
-    def apply_protection(self, repo_name, branch_name, existing_protection=None):
+    def apply_protection(self, repo_name, branch_name, existing_protection=None, default_branch="main"):
         """
         Apply compliant branch protection settings to a single branch.
         
@@ -1458,12 +1484,16 @@ class BranchProtectionApplier:
             repo_name: Repository name
             branch_name: Branch name
             existing_protection: Current protection settings (to preserve some values)
+            default_branch: Default branch for checking CODEOWNERS
         
         Returns:
             dict: Result with success status and details
         """
+        # Check if CODEOWNERS exists (required for require_code_owner_reviews)
+        has_codeowners = self.check_codeowners_exists(repo_name, default_branch)
+        
         endpoint = f"/repos/{self.org}/{repo_name}/branches/{branch_name}/protection"
-        payload = self.get_compliant_protection_payload(existing_protection)
+        payload = self.get_compliant_protection_payload(existing_protection, has_codeowners=has_codeowners)
         
         if self.dry_run:
             return {
@@ -1471,7 +1501,8 @@ class BranchProtectionApplier:
                 "dry_run": True,
                 "repository": repo_name,
                 "branch": branch_name,
-                "action": "Would apply compliant settings"
+                "has_codeowners": has_codeowners,
+                "action": f"Would apply compliant settings (code_owner_reviews={has_codeowners})"
             }
         
         try:
@@ -1482,13 +1513,15 @@ class BranchProtectionApplier:
                 "success": True,
                 "repository": repo_name,
                 "branch": branch_name,
-                "action": "Applied compliant settings"
+                "has_codeowners": has_codeowners,
+                "action": f"Applied compliant settings (code_owner_reviews={has_codeowners})"
             }
         except requests.exceptions.HTTPError as e:
             return {
                 "success": False,
                 "repository": repo_name,
                 "branch": branch_name,
+                "has_codeowners": has_codeowners,
                 "error": str(e)
             }
     
@@ -1524,6 +1557,7 @@ class BranchProtectionApplier:
         
         for repo_result in checker_results:
             repo_name = repo_result["repository"]
+            default_branch = repo_result.get("default_branch", "main")
             
             for branch_result in repo_result["branches"]:
                 branch_name = branch_result["branch"]
@@ -1538,6 +1572,7 @@ class BranchProtectionApplier:
                     non_compliant.append({
                         "repository": repo_name,
                         "branch": branch_name,
+                        "default_branch": default_branch,
                         "has_protection": branch_result["has_protection"],
                         "failed_rules": [
                             rule["rule"] for rule in branch_result["rules"]
@@ -1562,6 +1597,7 @@ class BranchProtectionApplier:
         for item in non_compliant:
             repo_name = item["repository"]
             branch_name = item["branch"]
+            default_branch = item.get("default_branch", "main")
             
             print(f"    {repo_name}/{branch_name}: ", end="")
             
@@ -1571,7 +1607,7 @@ class BranchProtectionApplier:
                 allow_404=True
             )
             
-            result = self.apply_protection(repo_name, branch_name, existing)
+            result = self.apply_protection(repo_name, branch_name, existing, default_branch)
             
             if result["success"]:
                 self.changes_made.append(result)
