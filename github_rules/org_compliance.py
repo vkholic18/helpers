@@ -82,8 +82,13 @@ import os
 import sys
 import json
 import time
+import argparse
 import requests
+import urllib3
 from datetime import datetime, timedelta, timezone
+
+# Disable SSL warnings for GHE with self-signed certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Excel support (required for report generation)
 import openpyxl
@@ -130,7 +135,7 @@ class GitHubAPIClient:
             dict or list: JSON response data
         """
         url = f"{self.base_url}{endpoint}"
-        response = requests.get(url, headers=self.headers)
+        response = requests.get(url, headers=self.headers, verify=False)
         
         if response.status_code == 404 and allow_404:
             return None
@@ -152,7 +157,7 @@ class GitHubAPIClient:
         url = f"{self.base_url}{endpoint}"
         
         while url:
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, verify=False)
             response.raise_for_status()
             data = response.json()
             
@@ -172,6 +177,55 @@ class GitHubAPIClient:
             time.sleep(SLEEP_INTERVAL)
         
         return results
+    
+    def put(self, endpoint, data):
+        """
+        Make a PUT request to the GitHub API.
+        
+        Args:
+            endpoint: API endpoint path
+            data: JSON data to send
+        
+        Returns:
+            dict: Response JSON
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.put(url, headers=self.headers, json=data, verify=False)
+        response.raise_for_status()
+        return response.json() if response.text else {}
+    
+    def patch(self, endpoint, data):
+        """
+        Make a PATCH request to the GitHub API.
+        
+        Used for updating organization settings.
+        
+        Args:
+            endpoint: API endpoint path
+            data: JSON data to send
+        
+        Returns:
+            dict: Response JSON
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.patch(url, headers=self.headers, json=data, verify=False)
+        response.raise_for_status()
+        return response.json() if response.text else {}
+    
+    def delete(self, endpoint):
+        """
+        Make a DELETE request to the GitHub API.
+        
+        Args:
+            endpoint: API endpoint path
+        
+        Returns:
+            bool: True if successful
+        """
+        url = f"{self.base_url}{endpoint}"
+        response = requests.delete(url, headers=self.headers, verify=False)
+        response.raise_for_status()
+        return True
 
 
 # =============================================================================
@@ -799,11 +853,417 @@ class ReportGenerator:
 
 
 # =============================================================================
+# ORGANIZATION COMPLIANCE APPLIER
+# =============================================================================
+
+class OrgComplianceApplier:
+    """
+    Applies compliant organization settings.
+    Supports backup before changes and rollback if needed.
+    
+    APPLY MODE:
+    -----------
+    1. Fetch current organization settings
+    2. Save backup to org_backup_TIMESTAMP.json
+    3. Apply compliant settings for failed rules
+    4. Generate report of changes made
+    
+    ROLLBACK MODE:
+    --------------
+    1. Read backup file
+    2. Restore original organization settings
+    3. Report what was restored
+    
+    WHAT CAN BE APPLIED:
+    --------------------
+    - default_repository_permission: PATCH /orgs/{org} with {"default_repository_permission": "none"}
+    - members_can_invite_outside_collaborators: PATCH /orgs/{org} with {"members_can_invite_outside_collaborators": false}
+    - members_can_create_public_repositories: PATCH /orgs/{org}
+    - members_can_change_repo_visibility: PATCH /orgs/{org}
+    - members_can_delete_repositories: PATCH /orgs/{org}
+    - members_can_create_teams: PATCH /orgs/{org}
+    
+    WHAT CANNOT BE APPLIED AUTOMATICALLY:
+    -------------------------------------
+    - unsecure_org_hooks: Requires manual webhook reconfiguration or deleting insecure hooks
+    - admin_activity_6_months: Governance issue, requires manual admin review
+    """
+    
+    def __init__(self, api_client, org_name, dry_run=False):
+        self.api = api_client
+        self.org = org_name
+        self.dry_run = dry_run
+        self.changes_made = []
+        self.errors = []
+        self.skipped = []
+    
+    def get_compliant_settings(self):
+        """
+        Get the compliant settings payload for organization.
+        
+        API: PATCH /orgs/{org}
+        
+        Returns:
+            dict: Compliant settings payload
+        """
+        return {
+            "default_repository_permission": "none",                    # Required rule
+            "members_can_invite_outside_collaborators": False,         # Required rule (via API: members_allowed_repository_creation_type)
+            "members_can_create_public_repositories": False,           # Recommended rule
+            "members_can_change_repo_visibility": False,               # Recommended rule
+            "members_can_delete_repositories": False,                  # Recommended rule
+            "members_can_create_teams": False                          # Recommended rule
+        }
+    
+    def backup_current_settings(self, current_org_data, check_results):
+        """
+        Save current organization settings to backup file.
+        
+        Args:
+            current_org_data: Current organization settings from API
+            check_results: Results from compliance check
+        
+        Returns:
+            str: Path to backup file
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        backup_file = f"org_backup_{timestamp}.json"
+        
+        # Extract relevant settings
+        backup_data = {
+            "timestamp": datetime.now().isoformat(),
+            "organization": self.org,
+            "settings": {
+                "default_repository_permission": current_org_data.get("default_repository_permission"),
+                "members_can_invite_outside_collaborators": current_org_data.get("members_can_invite_outside_collaborators"),
+                "members_can_create_public_repositories": current_org_data.get("members_can_create_public_repositories"),
+                "members_can_change_repo_visibility": current_org_data.get("members_can_change_repo_visibility"),
+                "members_can_delete_repositories": current_org_data.get("members_can_delete_repositories"),
+                "members_can_create_teams": current_org_data.get("members_can_create_teams"),
+                "members_can_create_internal_repositories": current_org_data.get("members_can_create_internal_repositories"),
+                "members_can_create_private_repositories": current_org_data.get("members_can_create_private_repositories")
+            },
+            "check_results": check_results
+        }
+        
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, indent=2, default=str)
+        
+        print(f"  Backup saved: {backup_file}")
+        return backup_file
+    
+    def apply_rule(self, rule_name, current_value, compliant_value):
+        """
+        Apply a single compliant setting.
+        
+        Args:
+            rule_name: Name of the rule/setting
+            current_value: Current value
+            compliant_value: Value to set for compliance
+        
+        Returns:
+            dict: Result with success status
+        """
+        # Map rule names to API field names
+        field_mapping = {
+            "default_repository_permission": "default_repository_permission",
+            "org_outside_collaborators": "members_can_invite_outside_collaborators",
+            "members_can_create_public_repositories": "members_can_create_public_repositories",
+            "visibility_change_disabled": "members_can_change_repo_visibility",
+            "delete_transfer_disabled": "members_can_delete_repositories",
+            "team_creation_disabled": "members_can_create_teams"
+        }
+        
+        api_field = field_mapping.get(rule_name)
+        if not api_field:
+            return {
+                "success": False,
+                "rule": rule_name,
+                "error": f"Cannot apply automatically: {rule_name} requires manual intervention"
+            }
+        
+        if self.dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "rule": rule_name,
+                "field": api_field,
+                "old_value": current_value,
+                "new_value": compliant_value,
+                "action": f"Would set {api_field} to {compliant_value}"
+            }
+        
+        try:
+            payload = {api_field: compliant_value}
+            self.api.patch(f"/orgs/{self.org}", payload)
+            time.sleep(SLEEP_INTERVAL)
+            
+            return {
+                "success": True,
+                "rule": rule_name,
+                "field": api_field,
+                "old_value": current_value,
+                "new_value": compliant_value,
+                "action": f"Set {api_field} to {compliant_value}"
+            }
+        except requests.exceptions.HTTPError as e:
+            return {
+                "success": False,
+                "rule": rule_name,
+                "field": api_field,
+                "error": str(e)
+            }
+    
+    def apply_all(self, check_results, current_org_data):
+        """
+        Apply compliant settings for all failed rules.
+        
+        Args:
+            check_results: Results from OrgComplianceChecker
+            current_org_data: Current organization settings
+        
+        Returns:
+            dict: Summary of changes made
+        """
+        print("\n" + "=" * 60)
+        print("APPLYING ORGANIZATION COMPLIANCE RULES")
+        print("=" * 60)
+        
+        if self.dry_run:
+            print("\n  *** DRY RUN MODE - No changes will be made ***\n")
+        
+        # Step 1: Create backup
+        print("\n  Creating backup of current settings...")
+        backup_file = self.backup_current_settings(current_org_data, check_results)
+        
+        # Step 2: Identify failed rules that can be applied
+        print("\n  Identifying failed rules...")
+        
+        # Rules that can be applied automatically
+        auto_apply_rules = {
+            "default_repository_permission": ("none", lambda x: x != "none"),
+            "org_outside_collaborators": (False, lambda x: x == "Enabled"),
+            "members_can_create_public_repositories": (False, lambda x: "Public: Yes" in str(x)),
+            "visibility_change_disabled": (False, lambda x: x == "Enabled"),
+            "delete_transfer_disabled": (False, lambda x: x == "Enabled"),
+            "team_creation_disabled": (False, lambda x: x == "Enabled")
+        }
+        
+        # Rules that cannot be applied automatically
+        manual_rules = ["unsecure_org_hooks", "admin_activity_6_months"]
+        
+        failed_rules = [r for r in check_results if not r["passed"]]
+        
+        if not failed_rules:
+            print("    All rules are compliant! No changes needed.")
+            return {
+                "backup_file": backup_file,
+                "changes_made": 0,
+                "errors": 0,
+                "skipped": 0
+            }
+        
+        print(f"    Found {len(failed_rules)} failed rules")
+        
+        # Step 3: Apply compliant settings
+        print("\n  Applying compliant settings...")
+        
+        for result in failed_rules:
+            rule_name = result["rule"]
+            current_value = result["current_value"]
+            
+            print(f"    {rule_name}: ", end="")
+            
+            if rule_name in manual_rules:
+                print("SKIPPED (requires manual action)")
+                self.skipped.append({
+                    "rule": rule_name,
+                    "reason": "Cannot be applied automatically - requires manual intervention"
+                })
+                continue
+            
+            if rule_name in auto_apply_rules:
+                compliant_value, _ = auto_apply_rules[rule_name]
+                apply_result = self.apply_rule(rule_name, current_value, compliant_value)
+                
+                if apply_result["success"]:
+                    self.changes_made.append(apply_result)
+                    if self.dry_run:
+                        print(f"Would apply ({compliant_value})")
+                    else:
+                        print(f"Applied ({compliant_value}) ✓")
+                else:
+                    self.errors.append(apply_result)
+                    print(f"ERROR: {apply_result.get('error', 'Unknown error')}")
+            else:
+                print("SKIPPED (unknown rule)")
+                self.skipped.append({
+                    "rule": rule_name,
+                    "reason": "Unknown rule - not in auto-apply list"
+                })
+        
+        # Summary
+        print("\n" + "-" * 40)
+        print("APPLY SUMMARY")
+        print("-" * 40)
+        print(f"  Backup file: {backup_file}")
+        print(f"  Successfully applied: {len(self.changes_made)}")
+        print(f"  Skipped (manual action required): {len(self.skipped)}")
+        print(f"  Errors: {len(self.errors)}")
+        
+        if self.dry_run:
+            print("\n  *** DRY RUN - No actual changes were made ***")
+            print(f"  Run without --dry-run to apply {len(self.changes_made)} changes")
+        
+        if self.skipped:
+            print("\n  Manual action required for:")
+            for item in self.skipped:
+                print(f"    - {item['rule']}: {item['reason']}")
+        
+        return {
+            "backup_file": backup_file,
+            "changes_made": len(self.changes_made),
+            "skipped": len(self.skipped),
+            "errors": len(self.errors),
+            "dry_run": self.dry_run
+        }
+
+
+# =============================================================================
+# ROLLBACK FUNCTIONALITY
+# =============================================================================
+
+def rollback_from_backup(api_client, backup_file):
+    """
+    Restore organization settings from a backup file.
+    
+    Args:
+        api_client: GitHubAPIClient instance
+        backup_file: Path to backup JSON file
+    
+    Returns:
+        dict: Summary of rollback results
+    """
+    print("\n" + "=" * 60)
+    print("ROLLING BACK FROM BACKUP")
+    print("=" * 60)
+    
+    # Read backup file
+    with open(backup_file, "r", encoding="utf-8") as f:
+        backup_data = json.load(f)
+    
+    org = backup_data["organization"]
+    settings = backup_data["settings"]
+    
+    print(f"\n  Backup from: {backup_data['timestamp']}")
+    print(f"  Organization: {org}")
+    
+    # Fields that can be restored
+    restorable_fields = [
+        "default_repository_permission",
+        "members_can_invite_outside_collaborators",
+        "members_can_create_public_repositories",
+        "members_can_change_repo_visibility",
+        "members_can_delete_repositories",
+        "members_can_create_teams"
+    ]
+    
+    print("\n  Restoring settings...")
+    restored = 0
+    errors = []
+    
+    for field in restorable_fields:
+        value = settings.get(field)
+        if value is not None:
+            print(f"    {field}: ", end="")
+            try:
+                api_client.patch(f"/orgs/{org}", {field: value})
+                print(f"Restored to {value} ✓")
+                restored += 1
+                time.sleep(SLEEP_INTERVAL)
+            except requests.exceptions.HTTPError as e:
+                print(f"ERROR: {e}")
+                errors.append({"field": field, "error": str(e)})
+    
+    # Summary
+    print("\n" + "-" * 40)
+    print("ROLLBACK SUMMARY")
+    print("-" * 40)
+    print(f"  Settings restored: {restored}")
+    print(f"  Errors: {len(errors)}")
+    
+    return {
+        "restored": restored,
+        "errors": len(errors),
+        "error_details": errors
+    }
+
+
+# =============================================================================
+# COMMAND LINE INTERFACE
+# =============================================================================
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="GitHub Organization Compliance Checker & Enforcer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --check              Check compliance (default, report only)
+  %(prog)s --apply              Apply compliant settings to organization
+  %(prog)s --apply --dry-run    Preview changes without applying
+  %(prog)s --rollback backup.json  Restore settings from backup file
+
+Settings that can be applied automatically:
+  - default_repository_permission (set to 'none')
+  - org_outside_collaborators (disable)
+  - members_can_create_public_repositories (disable)
+  - visibility_change_disabled (disable changes)
+  - delete_transfer_disabled (disable deletions)
+  - team_creation_disabled (disable team creation)
+
+Settings that require manual action:
+  - unsecure_org_hooks (webhook SSL must be enabled manually)
+  - admin_activity_6_months (governance review needed)
+        """
+    )
+    
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--check", "-c",
+        action="store_true",
+        default=True,
+        help="Check compliance and generate reports (default)"
+    )
+    mode_group.add_argument(
+        "--apply", "-a",
+        action="store_true",
+        help="Apply compliant settings to organization"
+    )
+    mode_group.add_argument(
+        "--rollback", "-r",
+        metavar="BACKUP_FILE",
+        help="Rollback to settings from backup file"
+    )
+    
+    parser.add_argument(
+        "--dry-run", "-n",
+        action="store_true",
+        help="Preview changes without applying (use with --apply)"
+    )
+    
+    return parser.parse_args()
+
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
 def main():
     """Main entry point."""
+    args = parse_arguments()
+    
     print("\n" + "=" * 60)
     print("GHE ORGANIZATION COMPLIANCE CHECKER")
     print("=" * 60)
@@ -823,6 +1283,19 @@ def main():
     # Initialize API client
     api_client = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
     
+    # Handle ROLLBACK mode
+    if args.rollback:
+        print(f"  Mode: ROLLBACK from {args.rollback}")
+        rollback_from_backup(api_client, args.rollback)
+        print("\n" + "=" * 60)
+        return
+    
+    # Handle CHECK and APPLY modes
+    if args.apply:
+        print(f"  Mode: APPLY {'(DRY RUN)' if args.dry_run else ''}")
+    else:
+        print(f"  Mode: CHECK (report only)")
+    
     # Run compliance checks
     checker = OrgComplianceChecker(api_client, GITHUB_ORG)
     results = checker.run_all_checks()
@@ -837,7 +1310,7 @@ def main():
     required_failed = sum(1 for r in results if not r["passed"] and r["enforcement"] == "Required")
     
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print("CHECK SUMMARY")
     print("=" * 60)
     print(f"  Total Rules: {len(results)}")
     print(f"  Passed: {passed}")
@@ -848,6 +1321,31 @@ def main():
         print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review required rules!")
     else:
         print("\n  ✅ All required rules passed!")
+    
+    # Handle APPLY mode
+    if args.apply:
+        if failed == 0:
+            print("\n  No compliance issues to fix.")
+        else:
+            # Get current org data for backup
+            current_org_data = checker.org_data
+            
+            applier = OrgComplianceApplier(api_client, GITHUB_ORG, dry_run=args.dry_run)
+            apply_result = applier.apply_all(results, current_org_data)
+            
+            # Save apply results to file
+            apply_log_file = f"org_apply_log_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+            with open(apply_log_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "timestamp": datetime.now().isoformat(),
+                    "organization": GITHUB_ORG,
+                    "dry_run": args.dry_run,
+                    "summary": apply_result,
+                    "changes": applier.changes_made,
+                    "skipped": applier.skipped,
+                    "errors": applier.errors
+                }, f, indent=2, default=str)
+            print(f"\n  Apply log saved: {apply_log_file}")
     
     print("\n" + "=" * 60)
 
