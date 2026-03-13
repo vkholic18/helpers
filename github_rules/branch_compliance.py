@@ -291,28 +291,23 @@ class OrgQualificationChecker:
         self.qualified = False
     
     def fetch_metadata(self, repo_name, default_branch):
-        """Fetch and parse .metadata file from repository."""
+        """Fetch and parse .metadata file from repository for a given branch name."""
         url = f"/repos/{self.org}/{repo_name}/contents/.metadata?ref={default_branch}"
         response = self.api.get(url, allow_404=True)
         time.sleep(SLEEP_INTERVAL)
-        
         if not response:
             return None
-        
         try:
             content = base64.b64decode(response.get("content", "")).decode("utf-8")
-            
             if YAML_AVAILABLE:
                 try:
                     return yaml.safe_load(content)
                 except:
                     pass
-            
             try:
                 return json.loads(content)
             except:
                 pass
-            
             return None
         except Exception:
             return None
@@ -1116,51 +1111,36 @@ class BranchComplianceChecker:
     def check_repository(self, repo_data):
         """
         Check production branches in a repository for branch protection compliance.
-        
-        FILTERING BASED ON .metadata FILE:
-        -----------------------------------
-        1. Fetch .metadata file from repository
-        2. If production_code = "no" → SKIP entire repo
-        3. If production_code = "yes" but production_branches is empty → SKIP repo
-        4. If production_code = "yes" and production_branches has values → check ONLY those branches
-        
-        Returns dict with repository info and branch results, or None if skipped.
+        Implements logic to skip repos if .metadata is only on main, not master, or missing on both.
+        Only check repos where .metadata is present on master.
         """
         repo_name = repo_data["name"]
+        # Always try master first
         default_branch = repo_data.get("default_branch", "master")
-        
         print(f"    Checking: {repo_name}")
-        
-        # Fetch .metadata file
-        metadata = self.fetch_metadata(repo_name, default_branch)
-        
-        # Check production_code value
+        metadata = self.fetch_metadata(repo_name, "master")
         if not metadata:
-            print(f"      SKIP: No .metadata file found")
-            return None
-        
+            # Try main if not found on master
+            metadata_main = self.fetch_metadata(repo_name, "main")
+            if metadata_main:
+                print(f"      SKIP: .metadata found only on 'main', not 'master' (per team policy)")
+                return None
+            else:
+                print(f"      SKIP: No .metadata file found on 'master' or 'main'")
+                return None
+        # Only proceed if .metadata is present on master
         production_code = str(metadata.get("production_code", "no")).lower()
-        
         if production_code != "yes":
             print(f"      SKIP: production_code = '{production_code}' (not 'yes')")
             return None
-        
-        # Get production_branches from metadata
         production_branches = metadata.get("production_branches", [])
-        
-        # Ensure it's a list
         if isinstance(production_branches, str):
             production_branches = [production_branches] if production_branches.strip() else []
-        
-        # Skip if production_branches is empty
         if not production_branches or production_branches == [""] or production_branches == [" "]:
             print(f"      SKIP: production_code = 'yes' but production_branches is empty")
             return None
-        
         print(f"      production_code: yes")
         print(f"      production_branches: {production_branches}")
-        
-        # Check ONLY the production branches
         branch_results = []
         for branch in production_branches:
             branch = branch.strip()
@@ -1169,11 +1149,9 @@ class BranchComplianceChecker:
             print(f"      Branch: {branch}")
             result = self.check_branch(repo_name, branch, default_branch)
             branch_results.append(result)
-        
         if not branch_results:
             print(f"      SKIP: No valid production branches to check")
             return None
-        
         return {
             "repository": repo_name,
             "default_branch": default_branch,
