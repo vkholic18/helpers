@@ -311,9 +311,15 @@ class OrgQualificationChecker:
         for repo in self.all_repos:
             repo_name = repo["name"]
             default_branch = repo.get("default_branch", "master")
-            
+            # Skip repos with main as default branch
+            if default_branch == "main":
+                print(f"    SKIP: {repo_name} (default branch is 'main')")
+                continue
+            # Skip repos starting with vcd- or mvcs-
+            if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
+                print(f"    SKIP: {repo_name} (repo name starts with vcd- or mvcs-)")
+                continue
             metadata = self.fetch_metadata(repo_name, default_branch)
-            
             if self.is_repo_sensitive(metadata):
                 sensitivity_reasons = []
                 if metadata:
@@ -323,7 +329,6 @@ class OrgQualificationChecker:
                         sensitivity_reasons.append("ip_sensitive")
                     if str(metadata.get("security_sensitive", "no")).lower() == "yes":
                         sensitivity_reasons.append("security_sensitive")
-                
                 self.sensitive_repos.append({
                     "repository": repo_name,
                     "reasons": sensitivity_reasons
@@ -387,52 +392,31 @@ class RepoComplianceChecker:
     
     def fetch_metadata(self, repo_name, default_branch):
         """
-        Fetch and parse .metadata file from repository.
-        
-        HOW WE FETCH METADATA:
-        ----------------------
-        1. Call GET /repos/{org}/{repo}/contents/.metadata?ref={default_branch}
-        2. Response contains base64-encoded content
-        3. Decode the content
-        4. Try to parse as YAML first (if pyyaml is available)
-        5. Fall back to JSON parsing
-        6. Return parsed dict or None if not found/invalid
-        
-        The .metadata file contains:
-        - production_code: yes/no
-        - production_branches: list of branches with production code
-        - production_code_end: date when production code is no longer active
-        - ip_sensitive: yes/no (contains intellectual property)
-        - security_sensitive: yes/no (contains security-sensitive info)
-        - public_override: true/false (exempt from private requirement)
+        Fetch and parse .metadata file from repository, with retry logic for connection errors.
         """
         url = f"/repos/{self.org}/{repo_name}/contents/.metadata?ref={default_branch}"
-        response = self.api.get(url, allow_404=True)
-        time.sleep(SLEEP_INTERVAL)
-        
-        if not response:
-            return None
-        
-        try:
-            # Content is base64 encoded
-            content = base64.b64decode(response.get("content", "")).decode("utf-8")
-            
-            # Try YAML first if available (more common format for .metadata)
-            if YAML_AVAILABLE:
+        retries = 3
+        for attempt in range(retries):
+            try:
+                response = self.api.get(url, allow_404=True)
+                time.sleep(SLEEP_INTERVAL)
+                if not response:
+                    return None
+                content = base64.b64decode(response.get("content", "")).decode("utf-8")
+                if YAML_AVAILABLE:
+                    try:
+                        return yaml.safe_load(content)
+                    except:
+                        pass
                 try:
-                    return yaml.safe_load(content)
+                    return json.loads(content)
                 except:
                     pass
-            
-            # Try JSON
-            try:
-                return json.loads(content)
-            except:
-                pass
-            
-            return None
-        except Exception:
-            return None
+                return None
+            except requests.exceptions.ConnectionError as e:
+                print(f"      WARNING: Connection error fetching .metadata for {repo_name} (attempt {attempt+1}/{retries}): {e}")
+                time.sleep(2)
+        return None
     
     # =========================================================================
     # REQUIRED RULES
@@ -674,7 +658,9 @@ class RepoComplianceChecker:
         """
         metadata = self.fetch_metadata(repo_name, default_branch)
         passed = metadata is not None
-        
+        # Only add .metadata if missing, never overwrite
+        if not passed:
+            print(f"      INFO: .metadata missing for {repo_name} (would add, but never overwrite existing)")
         return {
             "rule": "metadata_existing",
             "passed": passed,
@@ -1373,6 +1359,71 @@ class RepoComplianceApplier:
             }
     
     def apply_repo_fixes(self, repo_result):
+                        # Automated .metadata creation for Tornado repos (Non-Prod Gen1)
+                        tornado_missing_metadata = [
+                            "onecloud-tracker", "vcloud", "defect-analysis-tool", "Office-of-the-CTO", "vuln_scan_output", "JIL_MCV_Architecture", "personal_ms", "vcd-jil-test-automation", "foo-repo", "bar-repo", "vcd-test", "skytap-tracker", "vuln_scan_output_nonprod", "MVCS-Documentation", "NextGenVPC", "LOGAN-Documentation", "mvcs-prototype", "mvcs-tracker", "mvcs-mgmt-comm", "mvcs-mgmt-scheduler", "mvcs-mgmt-worker", "mvcs-mgmt-api", "mvcs-ansible", "mvcs-cli", "Isolation", "artemis-teams", "hpo-hipaa-assessment-2020", "vcd-access", "mvcs-change-management", "vcd-infra-comm", "vcd-infra-api", "vcd-infra-worker", "vcd-infra-scheduler", "codescan", "ursula_env", "non-personal-ids", "git-issue-analysis", "vpc-sp", "newrelic-monitor-synthetic", "vpc-veeam", "atlas-github-app-test-repo", "vcd-billing-resubmission-script", "v2t", "vcd-billing-reporting-script", "vcd-billing-cos-reader", "pvs-bur-sp", "vcd-reports-prototype", "console-e2e", "UIAutomationResult", "add-on-services-team", "vcd-language-translation", "PIM_to_Secrete_Manager_ESXI_Automation", "vcd-iaas-vro", "ipops-vcd-dev-request", "auditree_config", "vcd-SF-rev-20221114", "ic4v-evidence-locker", "ic4v-auditree-config", "vmware-sol-locker", "auditree-VCS-evidence-locker", "auditree-VCS", "gen1-evidence-locker-test1", "gen1-auditree-config", "ic4v-patent", "vcf-on-vpc-documentation", "vcd-pscli-veeam", "VCD-Price-change-July2023", "auditree-vuln-scan-output", "svelte-pocs", "advisory", "bss_cloudant_account_compare", "veeam-customer-schedule", "sf-shared-deprecation", "security-scans-config", "security-scans-compliance-issues", "security-scans-compliance-inventory", "security-scans-compliance-evidence", "postgressqlreportresults", "ic4v-data-analytics", "ic4v-data-analytics-common", "ic4v-vrops", "ic4v-platform-team-synlab", "license-expiry-reminder", "logger-agent-config", "onepipeline-compliance-incident-issues", "onepipeline-compliance-evidence-locker", "onepipeline-compliance-inventory", "kmip4hpcs_monitor"
+                        ]
+
+                        # Only add .metadata if missing, never overwrite
+                        if rule_name == "metadata_existing":
+                            # Skip if repo does not match the provided list
+                            if repo_name not in tornado_missing_metadata:
+                                repo_changes["skipped"].append({
+                                    "rule": rule_name,
+                                    "reason": "Repo not in Tornado missing .metadata list, skipping creation"
+                                })
+                                continue
+                            # Skip if repo starts with vcd- or mvcs-
+                            if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
+                                repo_changes["skipped"].append({
+                                    "rule": rule_name,
+                                    "reason": "Repo starts with vcd- or mvcs-, skipping creation"
+                                })
+                                continue
+                            # Skip if default branch is main
+                            if repo_result.get("default_branch", "master") == "main":
+                                repo_changes["skipped"].append({
+                                    "rule": rule_name,
+                                    "reason": "Default branch is main, skipping creation"
+                                })
+                                continue
+                            # Create Non-Prod Gen1 .metadata content
+                            metadata_content = {
+                                "service": "vmware-solutions",
+                                "production_code": "No",
+                                "production_branches": [""],
+                                "security_sensitive": "no",
+                                "ip_sensitive": "no",
+                                "allow_cloud_readers": "yes"
+                            }
+                            url = f"/repos/{self.org}/{repo_name}/contents/.metadata"
+                            data = {
+                                "message": "Add .metadata file for compliance",
+                                "content": base64.b64encode(json.dumps(metadata_content, indent=2).encode("utf-8")).decode("utf-8"),
+                                "branch": repo_result.get("default_branch", "master")
+                            }
+                            if not self.dry_run:
+                                resp = self.api.put(url, data)
+                                if resp and resp.get("content"):
+                                    repo_changes["changes"].append({
+                                        "rule": rule_name,
+                                        "action": "Created .metadata file",
+                                        "location": "root",
+                                        "success": True
+                                    })
+                                else:
+                                    repo_changes["errors"].append({
+                                        "rule": rule_name,
+                                        "error": "Failed to create .metadata file"
+                                    })
+                            else:
+                                repo_changes["changes"].append({
+                                    "rule": rule_name,
+                                    "action": "(Dry run) Would create .metadata file",
+                                    "location": "root",
+                                    "success": True
+                                })
+                            continue
         """
         Apply fixes for a single repository.
         
@@ -1441,6 +1492,91 @@ class RepoComplianceApplier:
                     result["rule"] = rule_name
                     if result.get("success"):
                         repo_changes["changes"].append(result)
+
+            # CODEOWNERS add-only automation (skip if no mapping)
+            elif rule_name == "codeowners_existing":
+                # Only create CODEOWNERS if missing and mapping exists
+                # Owner mapping logic (customize as needed)
+
+                # Tornado and VMW-Solutions repo/owner mapping (from user data)
+                # Unified CODEOWNERS mapping for all Tornado repos (from user data)
+                tornado_repos = [
+                    "common-utils", "build-ci", "bootstrap", "console", "service-framework", "service-implementations", "devops", "mgmt-comm", "mgmt-event", "kmipadapter", "kmipmgmt", "service-broker", "k8s-deploy", "mgmt-cos", "vcd-mgmt-api", "vcd-mgmt-job", "mgmt-metering", "vcd-bin-vdbc", "vcd-tracking-service", "atlas-dashboard", "vcd-mgmt-db", "vcd-billing-service", "vcd-billing-job", "vcd-mgmt-e2e", "skytap-console", "vcd-mgmt-veeam", "mgmt-mq", "images", "schematics", "mgmt-sysdig", "vcd-mgmt-scheduler", "ic4v-golang-sdk", "ic4v-java-sdk", "vcd-metrics-collector", "ic4v-node-sdk", "metrics-ingestor", "managed-portal-and-billing-team", "vcd-iaas-vra", "vcd-vrealize-webhook", "UX-Design", "console_scan", "vpc-msql", "istio-egress-control", "svt-automation-ui", "VRA-G1-FRA-PRD", "VRA-G1-DAL-PRD", "VRA-G1-PAR-PRD", "ipops-vcd-cases", "evidence_locker", "secretsmanager-utils", "IC4V-lifecycle-image", "per-core-licensing", "monitoring", "vcd-metering-reconciliation-patch", "vcd-iaas-vro-g2", "vcd-iaas-vro-g1", "credreconcileresults", "agent-configs", "common-scripts", "core-helper-scripts", "ci-pipeline-defs"
+                ]
+                tornado_owners = [
+                    "@durgadas", "@Vishakha-Sawant3", "@Tushar-Velingkar2", "@Jeetendra-Nayak2", "@Sankalp-Bhat1", "@Shail Kumari", "@Avinash Boini", "@Yvens Pinto"
+                ]
+                vmw_repos = [
+                    "ic4v-flask-lib", "ic4v-sddc", "ic4v-sqlalchemy-lib", "roks-configs", "ic4v-iaas", "ic4v-vmware-cloud-director", "ic4v-iaas-vhost", "ic4v-data", "atlas-dashboard", "ic4v-vdc-lifecycle", "vpc-vmware-terraform", "ic4v-update-vcd", "vpc-vmware-iaas-pub", "VCD-Terraform", "ic4v-license-check-result", "ic4v-metrics-ingestor", "ic4v-sysdig", "devops_tracker", "vpc-observability-terraform", "auditree_evidence_locker", "auditree_config", "change-management", "ic4v-control-plane-iac", "vpc-demo-modules", "vpc-demo-3tier", "auto-infra-devops", "auditree-vuln-scan-output", "ic4v-utils", "vpc-demo-3tier-autoscale", "ic4v-vpc-vsi-roks-bastion", "vpc-demo-hubspoke", "nonprod_auditree_config", "nonprod_auditree_evidence_locker", "ic4v-backup-restore", "ic4v-update-veeam", "ic4v-performance", "ic4v-smm", "ic4v-console", "iaas-mgmt", "onepipeline-compliance-inventory", "ic4v-vcda", "ic4v-reconciliation", "ic4v-licensing", "ic4v-update-vcda", "vcf-vpc-automation", "vcf-vpc-automation-sddc", "ic4v-licensing-service", "ic4v-veeam-kpi-collector", "rmc_xls_part_price_compare", "ic4v-update-usage-meter", "g11n-tracker", "ic4v-cos-sync", "ic4v-licensing-service-billing", "ic4v-vm-operations", "ic4v-licensing-service-iac", "submission_evidence_utils", "ic4v-secrets-operator", "ic4v-secrets-sync", "MT-price-change-202401", "ic4v-ad-learning", "vmaas-terraform", "ic4v-secrets-inventory", "ic4v-sm-migrate", "devtest-compliance", "devtest-compliance-sos", "onepipeline-compliance-evidence-locker", "ic4v-cot", "monitoring", "ic4v-vmc-cli", "ic4v-vmc-cli-ops", "ic4v-logging-demo", "ic4v-srx-template", "ic4v-srx-configs", "ic4v-usage-meter", "ic4v-syslog-demo", "ic4v-um-proxy", "ic4v-vmca-cli", "ic4v-security", "WIP-SLA", "ic4v-governance", "ic4v-srx-configs-change-log", "ic4v-vmc-cli-fake-remote", "ansible-change-log", "ic4v-vmca-edr-installer", "ansible-password-rotation", "doc-separation-test", "ic4v-vmca-playbooks", "openapi-client-generator", "ic4v-governance-automation", "ic4v-vmca-ip-loader", "ic4v-secrets-placeholder-creator", "vm_system_uuid_reset", "ic4v-sos-cli", "ic4v-secrets-operator-v2", "copy_dev_cos_to_stag", "ansible-monitoring", "ansible-health-checks", "ic4v-license-inventory", "PlatformDevOps", "ic4v-usage-meter-proxy", "ic4v-update-vrni", "security-compliance-output", "titan", "ic4v-pipeline-iac", "workernodeupdatelogs", "ic4v-iaas-vpc", "ic4v-license-ui", "icl_alerts", "ic4v-vcfvpc-automation", "ic4v-external-apis-lib", "vcd-iaas-vra", "vcd-iaas-vro-g2", "ic4v-vmca-scripts", "compliance-pipeline-defs", "iaas-vro-g2", "cli-vmaas-plugin", "security-scans-compliance-evidence", "security-scans-compliance-inventory", "ic4v-cos-sync-tekton"
+                ]
+                vmw_owners = [
+                    "@durgadas", "@Shakil-Usgaonker2", "@Tushar-Velingkar2", "@Jeetendra-Nayak2", "@Yvens Pinto", "@Shruti-Vasudeo2", "@Siddhi-Borkar2", "@Prachi-Kamat4", "@Bhushan-Borkar2"
+                ]
+
+                # Check if CODEOWNERS exists (API call)
+                def codeowners_exists():
+                    locations = [
+                        f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS?ref=master",
+                        f"/repos/{self.org}/{repo_name}/contents/docs/CODEOWNERS?ref=master",
+                        f"/repos/{self.org}/{repo_name}/contents/.github/CODEOWNERS?ref=master",
+                    ]
+                    for url in locations:
+                        result = self.api.get(url, allow_404=True)
+                        time.sleep(0.3)
+                        if result:
+                            return True
+                    return False
+
+                if codeowners_exists():
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "CODEOWNERS already exists, will not overwrite"
+                    })
+                else:
+                    if repo_name in tornado_repos:
+                        owners = tornado_owners
+                    elif repo_name in vmw_repos:
+                        owners = vmw_owners
+                    else:
+                        repo_changes["skipped"].append({
+                            "rule": rule_name,
+                            "reason": "No CODEOWNERS mapping for this repo, skipping creation"
+                        })
+                        continue
+                    if not owners:
+                        repo_changes["skipped"].append({
+                            "rule": rule_name,
+                            "reason": "No reviewers listed for this repo, skipping creation"
+                        })
+                        continue
+                    codeowners_content = "* " + " ".join(owners) + "\n"
+                    url = f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS"
+                    data = {
+                        "message": "Add CODEOWNERS file for compliance",
+                        "content": base64.b64encode(codeowners_content.encode("utf-8")).decode("utf-8"),
+                        "branch": "master"
+                    }
+                    if not self.dry_run:
+                        resp = self.api.put(url, data)
+                        if resp and resp.get("content"):
+                            repo_changes["changes"].append({
+                                "rule": rule_name,
+                                "action": "Created CODEOWNERS file",
+                                "location": "root",
+                                "success": True
+                            })
+                        else:
+                            repo_changes["errors"].append({
+                                "rule": rule_name,
+                                "error": "Failed to create CODEOWNERS file"
+                            })
+                    else:
+                        repo_changes["changes"].append({
+                            "rule": rule_name,
+                            "action": "(Dry run) Would create CODEOWNERS file",
+                            "location": "root",
+                            "success": True
+                        })
                     else:
                         repo_changes["errors"].append(result)
             
