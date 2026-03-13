@@ -361,7 +361,7 @@ class OrgQualificationChecker:
         
         for repo in self.all_repos:
             repo_name = repo["name"]
-            default_branch = repo.get("default_branch", "main")
+            default_branch = repo.get("default_branch", "master")
             
             metadata = self.fetch_metadata(repo_name, default_branch)
             
@@ -1127,7 +1127,7 @@ class BranchComplianceChecker:
         Returns dict with repository info and branch results, or None if skipped.
         """
         repo_name = repo_data["name"]
-        default_branch = repo_data.get("default_branch", "main")
+        default_branch = repo_data.get("default_branch", "master")
         
         print(f"    Checking: {repo_name}")
         
@@ -1488,7 +1488,7 @@ class BranchProtectionApplier:
         self.changes_made = []
         self.errors = []
     
-    def check_codeowners_exists(self, repo_name, default_branch="main"):
+    def check_codeowners_exists(self, repo_name, default_branch="master"):
         """Check if CODEOWNERS file exists in the repository."""
         locations = [
             f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS?ref={default_branch}",
@@ -1622,7 +1622,7 @@ class BranchProtectionApplier:
         
         return backup_file
     
-    def apply_protection(self, repo_name, branch_name, existing_protection=None, default_branch="main"):
+    def apply_protection(self, repo_name, branch_name, existing_protection=None, default_branch="master"):
         """
         Apply compliant branch protection settings to a single branch.
         
@@ -1705,7 +1705,7 @@ class BranchProtectionApplier:
         
         for repo_result in checker_results:
             repo_name = repo_result["repository"]
-            default_branch = repo_result.get("default_branch", "main")
+            default_branch = repo_result.get("default_branch", "master")
             
             for branch_result in repo_result["branches"]:
                 branch_name = branch_result["branch"]
@@ -1745,7 +1745,7 @@ class BranchProtectionApplier:
         for item in non_compliant:
             repo_name = item["repository"]
             branch_name = item["branch"]
-            default_branch = item.get("default_branch", "main")
+            default_branch = item.get("default_branch", "master")
             
             print(f"    {repo_name}/{branch_name}: ", end="")
             
