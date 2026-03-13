@@ -211,6 +211,153 @@ class GitHubAPIClient:
 
 
 # =============================================================================
+# ORGANIZATION QUALIFICATION CHECKER
+# =============================================================================
+
+class OrgQualificationChecker:
+    """
+    Determines if an organization requires compliance checks.
+    
+    QUALIFICATION RULE:
+    -------------------
+    An organization requires compliance checks if it contains AT LEAST ONE
+    repository with:
+    - production_code = yes, OR
+    - ip_sensitive = yes, OR
+    - security_sensitive = yes
+    
+    If an org qualifies:
+    - ALL org-level settings must be checked
+    - ALL repositories in the org must be checked (not just sensitive ones)
+    - Branch protection must be checked on production_branches of production repos
+    """
+    
+    def __init__(self, api_client, org_name):
+        self.api = api_client
+        self.org = org_name
+        self.sensitive_repos = []
+        self.all_repos = []
+        self.qualified = False
+    
+    def fetch_metadata(self, repo_name, default_branch):
+        """Fetch and parse .metadata file from repository."""
+        url = f"/repos/{self.org}/{repo_name}/contents/.metadata?ref={default_branch}"
+        response = self.api.get(url, allow_404=True)
+        time.sleep(SLEEP_INTERVAL)
+        
+        if not response:
+            return None
+        
+        try:
+            content = base64.b64decode(response.get("content", "")).decode("utf-8")
+            
+            if YAML_AVAILABLE:
+                try:
+                    return yaml.safe_load(content)
+                except:
+                    pass
+            
+            try:
+                return json.loads(content)
+            except:
+                pass
+            
+            return None
+        except Exception:
+            return None
+    
+    def is_repo_sensitive(self, metadata):
+        """
+        Check if a repository is sensitive based on its metadata.
+        
+        Returns True if any of:
+        - production_code = yes
+        - ip_sensitive = yes
+        - security_sensitive = yes
+        """
+        if not metadata:
+            return False
+        
+        production_code = str(metadata.get("production_code", "no")).lower() == "yes"
+        ip_sensitive = str(metadata.get("ip_sensitive", "no")).lower() == "yes"
+        security_sensitive = str(metadata.get("security_sensitive", "no")).lower() == "yes"
+        
+        return production_code or ip_sensitive or security_sensitive
+    
+    def check_qualification(self):
+        """
+        Check if the organization requires compliance checks.
+        
+        Scans all repositories in the org to find if any contain
+        production code, IP-sensitive, or security-sensitive content.
+        
+        Returns:
+            dict: Qualification result with details
+        """
+        print("\n" + "=" * 60)
+        print("ORGANIZATION QUALIFICATION CHECK")
+        print("=" * 60)
+        print(f"\n  Scanning repositories in '{self.org}' for sensitive content...")
+        
+        # Fetch all repositories
+        self.all_repos = self.api.paginate(f"/orgs/{self.org}/repos?per_page=100")
+        time.sleep(SLEEP_INTERVAL)
+        
+        print(f"  Found {len(self.all_repos)} repositories")
+        
+        # Check each repo's metadata
+        print("  Checking .metadata files for sensitive content markers...")
+        
+        for repo in self.all_repos:
+            repo_name = repo["name"]
+            default_branch = repo.get("default_branch", "main")
+            
+            metadata = self.fetch_metadata(repo_name, default_branch)
+            
+            if self.is_repo_sensitive(metadata):
+                sensitivity_reasons = []
+                if metadata:
+                    if str(metadata.get("production_code", "no")).lower() == "yes":
+                        sensitivity_reasons.append("production_code")
+                    if str(metadata.get("ip_sensitive", "no")).lower() == "yes":
+                        sensitivity_reasons.append("ip_sensitive")
+                    if str(metadata.get("security_sensitive", "no")).lower() == "yes":
+                        sensitivity_reasons.append("security_sensitive")
+                
+                self.sensitive_repos.append({
+                    "repository": repo_name,
+                    "reasons": sensitivity_reasons
+                })
+                print(f"    ✓ {repo_name}: SENSITIVE ({', '.join(sensitivity_reasons)})")
+        
+        self.qualified = len(self.sensitive_repos) > 0
+        
+        print("\n" + "-" * 40)
+        print("QUALIFICATION RESULT")
+        print("-" * 40)
+        
+        if self.qualified:
+            print(f"  ✅ Organization QUALIFIES for compliance checks")
+            print(f"     Found {len(self.sensitive_repos)} sensitive repositories:")
+            for repo in self.sensitive_repos[:5]:  # Show first 5
+                print(f"       - {repo['repository']}: {', '.join(repo['reasons'])}")
+            if len(self.sensitive_repos) > 5:
+                print(f"       ... and {len(self.sensitive_repos) - 5} more")
+            print(f"\n     ALL {len(self.all_repos)} repositories in this org will be subject to compliance checks.")
+        else:
+            print(f"  ℹ️  Organization does NOT qualify for compliance checks")
+            print(f"     No repositories found with production_code, ip_sensitive, or security_sensitive = yes")
+            print(f"     Compliance checking is not required for this organization.")
+        
+        return {
+            "qualified": self.qualified,
+            "total_repos": len(self.all_repos),
+            "sensitive_repos_count": len(self.sensitive_repos),
+            "sensitive_repos": self.sensitive_repos
+        }
+
+
+# =============================================================================
 # REPOSITORY COMPLIANCE CHECKER
 # =============================================================================
 
@@ -1545,6 +1692,7 @@ Examples:
   %(prog)s --apply --dry-run          Preview changes without applying
   %(prog)s --repo my-repo --apply     Apply fixes to one repo only
   %(prog)s --rollback backup.json     Restore settings from backup file
+  %(prog)s --qualification-only       Only check if org requires compliance
 
 Settings that can be applied automatically:
   - unsecure_hooks (enable SSL verification on webhooks)
@@ -1556,6 +1704,11 @@ Settings that can be applied automatically:
 
 Settings that require manual action:
   - metadata_existing (.metadata file must be created manually)
+
+Organization Qualification:
+  Compliance checks only apply to organizations that contain at least
+  one repository with production_code, ip_sensitive, or security_sensitive = yes.
+  If qualified, ALL repos in the org must be checked (not just sensitive ones).
         """
     )
     
@@ -1587,6 +1740,18 @@ Settings that require manual action:
         "--repo",
         metavar="REPO_NAME",
         help="Target a specific repository (for testing before org-wide apply)"
+    )
+    
+    parser.add_argument(
+        "--skip-qualification",
+        action="store_true",
+        help="Skip qualification check and run compliance checks regardless"
+    )
+    
+    parser.add_argument(
+        "--qualification-only",
+        action="store_true",
+        help="Only run the qualification check, don't run compliance checks"
     )
     
     return parser.parse_args()
@@ -1627,6 +1792,51 @@ def main():
         rollback_from_backup(api_client, args.rollback, GITHUB_ORG)
         print("\n" + "=" * 60)
         return
+    
+    # =========================================================================
+    # STEP 1: QUALIFICATION CHECK
+    # =========================================================================
+    # Check if this organization requires compliance checks based on whether
+    # it contains any repositories with:
+    # - production_code = yes, OR
+    # - ip_sensitive = yes, OR
+    # - security_sensitive = yes
+    #
+    # If qualified: ALL repos in the org must be checked (not just sensitive ones)
+    # =========================================================================
+    
+    if not args.skip_qualification:
+        qual_checker = OrgQualificationChecker(api_client, GITHUB_ORG)
+        qual_result = qual_checker.check_qualification()
+        
+        # Save qualification result
+        qual_report_file = f"repo_qualification_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+        with open(qual_report_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": datetime.now().isoformat(),
+                "organization": GITHUB_ORG,
+                "qualification": qual_result
+            }, f, indent=2, default=str)
+        print(f"\n  Qualification report saved: {qual_report_file}")
+        
+        if args.qualification_only:
+            print("\n" + "=" * 60)
+            return
+        
+        if not qual_result["qualified"]:
+            print("\n" + "=" * 60)
+            print("SKIPPING COMPLIANCE CHECKS")
+            print("=" * 60)
+            print("  Organization does not require compliance checks.")
+            print("  Use --skip-qualification to force compliance checks anyway.")
+            print("\n" + "=" * 60)
+            return
+    else:
+        print("\n  Skipping qualification check (--skip-qualification)")
+    
+    # =========================================================================
+    # STEP 2: COMPLIANCE CHECKS
+    # =========================================================================
     
     # Handle CHECK and APPLY modes
     if args.apply:
