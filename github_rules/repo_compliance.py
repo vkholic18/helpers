@@ -310,7 +310,7 @@ class OrgQualificationChecker:
         
         for repo in self.all_repos:
             repo_name = repo["name"]
-            default_branch = repo.get("default_branch", "main")
+            default_branch = repo.get("default_branch", "master")
             
             metadata = self.fetch_metadata(repo_name, default_branch)
             
@@ -843,7 +843,7 @@ class RepoComplianceChecker:
         Returns dict with all rule results for this repository.
         """
         repo_name = repo_data["name"]
-        default_branch = repo_data.get("default_branch", "main")
+        default_branch = repo_data.get("default_branch", "master")
         
         print(f"    Checking: {repo_name}")
         
