@@ -57,7 +57,13 @@ GITHUB_ORG = os.getenv("GITHUB_ORG")
 GITHUB_BASE = "https://github.ibm.com/api/v3"
 GITHUB_WEB = "https://github.ibm.com"
 
-SLEEP_INTERVAL = 0.3
+SLEEP_INTERVAL = 0.2
+
+# counters
+repos_checked = 0
+created_count = 0
+skip_count = 0
+error_count = 0
 
 
 # -----------------------------
@@ -79,7 +85,7 @@ class GitHubAPIClient:
 
 
 # -----------------------------
-# Get Default Branch
+# Default Branch
 # -----------------------------
 
 def get_default_branch(api, org, repo):
@@ -97,10 +103,10 @@ def get_default_branch(api, org, repo):
 
 
 # -----------------------------
-# Detect CODEOWNERS location
+# Find CODEOWNERS
 # -----------------------------
 
-def get_codeowners_path(api, org, repo, branch):
+def find_codeowners(api, org, repo, branch):
 
     paths = [
         ".github/CODEOWNERS",
@@ -115,13 +121,6 @@ def get_codeowners_path(api, org, repo, branch):
         resp = api.session.get(url, verify=False, timeout=20)
 
         if resp.status_code == 200:
-
-            full_path = f"{org}/{repo}/{path}"
-            github_url = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}"
-
-            print(f"SKIP: CODEOWNERS exists at {full_path}")
-            print(f"      URL: {github_url}")
-
             return path
 
         if resp.status_code not in (200,404):
@@ -133,23 +132,41 @@ def get_codeowners_path(api, org, repo, branch):
 
 
 # -----------------------------
+# Print Location
+# -----------------------------
+
+def print_location(org, repo, branch, path):
+
+    full_path = f"{org}/{repo}/{path}"
+    url = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}"
+
+    print(f"SKIP: CODEOWNERS exists at {full_path}")
+    print(f"      URL: {url}")
+
+
+# -----------------------------
 # Create CODEOWNERS
 # -----------------------------
 
 def create_codeowners(api, org, repo, owners):
 
+    global repos_checked, created_count, skip_count, error_count
+
+    repos_checked += 1
+
     branch = get_default_branch(api, org, repo)
 
     if branch is None:
         print(f"ERROR: Repo not found -> {repo}")
+        error_count += 1
         return
 
-
-    path = get_codeowners_path(api, org, repo, branch)
+    path = find_codeowners(api, org, repo, branch)
 
     if path:
+        print_location(org, repo, branch, path)
+        skip_count += 1
         return
-
 
     codeowners_content = "* " + " ".join(owners) + "\n"
 
@@ -165,19 +182,29 @@ def create_codeowners(api, org, repo, owners):
 
     if resp.status_code == 201:
 
-        print(f"SUCCESS: Created CODEOWNERS for {repo}")
+        path = ".github/CODEOWNERS"
 
-        print(
-            f"URL: {GITHUB_WEB}/{org}/{repo}/blob/{branch}/.github/CODEOWNERS"
-        )
+        full_path = f"{org}/{repo}/{path}"
+        link = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}"
+
+        print(f"SUCCESS: Created CODEOWNERS at {full_path}")
+        print(f"         URL: {link}")
+
+        created_count += 1
 
     elif resp.status_code == 409:
 
-        print(f"SKIP: CODEOWNERS already exists for {repo}")
+        # race condition fallback
+        path = find_codeowners(api, org, repo, branch)
+
+        if path:
+            print_location(org, repo, branch, path)
+            skip_count += 1
 
     else:
 
         print(f"ERROR: {repo} -> {resp.text}")
+        error_count += 1
 
 
 # -----------------------------
@@ -195,17 +222,33 @@ def main():
 
     if GITHUB_ORG == "tornado":
 
-        for repo in TORNADO_REPOS:
-            create_codeowners(api, GITHUB_ORG, repo, TORNADO_OWNERS)
+        repos = TORNADO_REPOS
+        owners = TORNADO_OWNERS
 
     elif GITHUB_ORG == "vmwsolutions":
 
-        for repo in VMW_REPOS:
-            create_codeowners(api, GITHUB_ORG, repo, VMW_OWNERS)
+        repos = VMW_REPOS
+        owners = VMW_OWNERS
 
     else:
 
-        print("Unsupported organization")
+        raise Exception("Unsupported organization")
+
+
+    for repo in repos:
+
+        create_codeowners(api, GITHUB_ORG, repo, owners)
+
+
+    # summary
+    print("\n----------------------------------")
+    print("CODEOWNERS Automation Summary")
+    print("----------------------------------")
+    print(f"Repositories checked : {repos_checked}")
+    print(f"CODEOWNERS created   : {created_count}")
+    print(f"Already existed      : {skip_count}")
+    print(f"Errors               : {error_count}")
+    print("----------------------------------\n")
 
 
 if __name__ == "__main__":
