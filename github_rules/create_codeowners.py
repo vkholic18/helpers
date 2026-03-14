@@ -132,7 +132,7 @@ def find_codeowners(api, org, repo, branch):
 
 
 # -----------------------------
-# Print Location
+# Print location
 # -----------------------------
 
 def print_location(org, repo, branch, path):
@@ -184,22 +184,20 @@ def create_codeowners(api, org, repo, owners):
 
         path = ".github/CODEOWNERS"
 
-        full_path = f"{org}/{repo}/{path}"
-        link = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}"
-
-        print(f"SUCCESS: Created CODEOWNERS at {full_path}")
-        print(f"         URL: {link}")
+        print(f"SUCCESS: Created CODEOWNERS at {org}/{repo}/{path}")
+        print(f"         URL: {GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}")
 
         created_count += 1
 
     elif resp.status_code == 409:
 
-        # race condition fallback
+        # fallback check
         path = find_codeowners(api, org, repo, branch)
 
         if path:
             print_location(org, repo, branch, path)
-            skip_count += 1
+
+        skip_count += 1
 
     else:
 
@@ -221,26 +219,21 @@ def main():
     print(f"\nRunning CODEOWNERS automation for org: {GITHUB_ORG}\n")
 
     if GITHUB_ORG == "tornado":
-
         repos = TORNADO_REPOS
         owners = TORNADO_OWNERS
 
     elif GITHUB_ORG == "vmwsolutions":
-
         repos = VMW_REPOS
         owners = VMW_OWNERS
 
     else:
-
         raise Exception("Unsupported organization")
 
 
     for repo in repos:
-
         create_codeowners(api, GITHUB_ORG, repo, owners)
 
 
-    # summary
     print("\n----------------------------------")
     print("CODEOWNERS Automation Summary")
     print("----------------------------------")
