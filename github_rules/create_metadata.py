@@ -2,6 +2,7 @@ import requests
 import base64
 import json
 import time
+import os
 
 # -------------------------------
 # Repo Lists
@@ -50,7 +51,9 @@ VMW_REPOS = [
 # -------------------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_ORG = os.getenv("GITHUB_ORG")
+
+TORNADO_ORG = os.getenv("TORNADO_ORG")
+VMW_ORG = os.getenv("VMW_ORG")
 
 GITHUB_BASE = "https://github.ibm.com/api/v3"
 
@@ -67,9 +70,9 @@ session.headers.update({
 # Helpers
 # -------------------------------
 
-def get_default_branch(repo):
+def get_default_branch(org, repo):
 
-    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}"
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}"
     r = session.get(url)
 
     if r.status_code != 200:
@@ -78,15 +81,15 @@ def get_default_branch(repo):
     return r.json()["default_branch"]
 
 
-def metadata_exists(repo, branch):
+def metadata_exists(org, repo, branch):
 
-    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.metadata?ref={branch}"
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/.metadata?ref={branch}"
     r = session.get(url)
 
     return r.status_code == 200
 
 
-def create_metadata(repo, branch, service):
+def create_metadata(org, repo, branch, service):
 
     metadata = {
         "service": service,
@@ -107,7 +110,7 @@ def create_metadata(repo, branch, service):
         "branch": branch
     }
 
-    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.metadata"
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/.metadata"
 
     r = session.put(url, json=data)
 
@@ -124,7 +127,7 @@ def create_metadata(repo, branch, service):
         print(f"ERROR {repo}: {r.status_code}")
 
 
-def process_repo(repo, service):
+def process_repo(org, repo, service):
 
     repo_lower = repo.lower()
 
@@ -137,17 +140,18 @@ def process_repo(repo, service):
         return
 
     try:
-        branch = get_default_branch(repo)
+
+        branch = get_default_branch(org, repo)
 
         if branch == "main":
             print(f"SKIP main branch repo: {repo}")
             return
 
-        if metadata_exists(repo, branch):
+        if metadata_exists(org, repo, branch):
             print(f"SKIP metadata exists: {repo}")
             return
 
-        create_metadata(repo, branch, service)
+        create_metadata(org, repo, branch, service)
 
         time.sleep(SLEEP_INTERVAL)
 
@@ -164,12 +168,12 @@ def main():
     print("\nProcessing Tornado repos...\n")
 
     for repo in TORNADO_REPOS:
-        process_repo(repo, "vmware-solutions")
+        process_repo(TORNADO_ORG, repo, "vmware-solutions")
 
     print("\nProcessing VMW repos...\n")
 
     for repo in VMW_REPOS:
-        process_repo(repo, "vmware")
+        process_repo(VMW_ORG, repo, "vmware")
 
 
 if __name__ == "__main__":
