@@ -59,40 +59,25 @@ GITHUB_WEB = "https://github.ibm.com"
 
 SLEEP_INTERVAL = 0.2
 
-# counters
-repos_checked = 0
-created_count = 0
-skip_count = 0
-error_count = 0
-
-
 # -----------------------------
 # GitHub Client
 # -----------------------------
 
-class GitHubAPIClient:
-
-    def __init__(self, base_url, token):
-
-        self.base_url = base_url
-
-        self.session = requests.Session()
-
-        self.session.headers.update({
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        })
-
+session = requests.Session()
+session.headers.update({
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json"
+})
 
 # -----------------------------
-# Default Branch
+# Default branch
 # -----------------------------
 
-def get_default_branch(api, org, repo):
+def get_default_branch(org, repo):
 
-    url = f"{api.base_url}/repos/{org}/{repo}"
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}"
 
-    resp = api.session.get(url, verify=False, timeout=20)
+    resp = session.get(url, verify=False, timeout=20)
 
     if resp.status_code == 404:
         return None
@@ -101,12 +86,11 @@ def get_default_branch(api, org, repo):
 
     return resp.json()["default_branch"]
 
-
 # -----------------------------
-# Find CODEOWNERS
+# Detect CODEOWNERS
 # -----------------------------
 
-def find_codeowners(api, org, repo, branch):
+def find_codeowners(org, repo, branch):
 
     paths = [
         ".github/CODEOWNERS",
@@ -116,9 +100,9 @@ def find_codeowners(api, org, repo, branch):
 
     for path in paths:
 
-        url = f"{api.base_url}/repos/{org}/{repo}/contents/{path}?ref={branch}"
+        url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/{path}?ref={branch}"
 
-        resp = api.session.get(url, verify=False, timeout=20)
+        resp = session.get(url, verify=False, timeout=20)
 
         if resp.status_code == 200:
             return path
@@ -130,80 +114,65 @@ def find_codeowners(api, org, repo, branch):
 
     return None
 
-
 # -----------------------------
-# Print location
+# Print helper
 # -----------------------------
 
-def print_location(org, repo, branch, path):
+def print_location(org, repo, branch, path, status):
 
-    full_path = f"{org}/{repo}/{path}"
+    full = f"{org}/{repo}/{path}"
     url = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}"
 
-    print(f"SKIP: CODEOWNERS exists at {full_path}")
-    print(f"      URL: {url}")
-
+    print(f"{status}: {full}")
+    print(f"URL: {url}")
 
 # -----------------------------
 # Create CODEOWNERS
 # -----------------------------
 
-def create_codeowners(api, org, repo, owners):
+def create_codeowners(org, repo, owners):
 
-    global repos_checked, created_count, skip_count, error_count
-
-    repos_checked += 1
-
-    branch = get_default_branch(api, org, repo)
+    branch = get_default_branch(org, repo)
 
     if branch is None:
-        print(f"ERROR: Repo not found -> {repo}")
-        error_count += 1
+        print(f"ERROR: {repo} not found")
         return
 
-    path = find_codeowners(api, org, repo, branch)
+    path = find_codeowners(org, repo, branch)
 
+    # exists
     if path:
-        print_location(org, repo, branch, path)
-        skip_count += 1
+        print_location(org, repo, branch, path, "EXISTS")
         return
 
-    codeowners_content = "* " + " ".join(owners) + "\n"
+    # create
+    content = "* " + " ".join(owners) + "\n"
 
-    url = f"{api.base_url}/repos/{org}/{repo}/contents/.github/CODEOWNERS"
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/.github/CODEOWNERS"
 
     data = {
-        "message": "Add CODEOWNERS file for compliance",
-        "content": base64.b64encode(codeowners_content.encode()).decode(),
+        "message": "Add CODEOWNERS for compliance",
+        "content": base64.b64encode(content.encode()).decode(),
         "branch": branch
     }
 
-    resp = api.session.put(url, json=data, verify=False, timeout=20)
+    resp = session.put(url, json=data, verify=False, timeout=20)
 
-    if resp.status_code == 201:
+    if resp.status_code in (200,201):
 
-        path = ".github/CODEOWNERS"
-
-        print(f"SUCCESS: Created CODEOWNERS at {org}/{repo}/{path}")
-        print(f"         URL: {GITHUB_WEB}/{org}/{repo}/blob/{branch}/{path}")
-
-        created_count += 1
+        print_location(org, repo, branch, ".github/CODEOWNERS", "CREATED")
 
     elif resp.status_code == 409:
 
-        # fallback check
-        path = find_codeowners(api, org, repo, branch)
+        path = find_codeowners(org, repo, branch)
 
         if path:
-            print_location(org, repo, branch, path)
-
-        skip_count += 1
+            print_location(org, repo, branch, path, "EXISTS")
 
     else:
 
-        print(f"ERROR: {repo} -> {resp.text}")
-        error_count += 1
-
+        print(f"ERROR creating CODEOWNERS for {repo}")
+        print(resp.text)
 
 # -----------------------------
 # Main
@@ -214,9 +183,7 @@ def main():
     if not GITHUB_TOKEN or not GITHUB_ORG:
         raise Exception("Missing GITHUB_TOKEN or GITHUB_ORG")
 
-    api = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
-
-    print(f"\nRunning CODEOWNERS automation for org: {GITHUB_ORG}\n")
+    print(f"\nRunning CODEOWNERS check for org: {GITHUB_ORG}\n")
 
     if GITHUB_ORG == "tornado":
         repos = TORNADO_REPOS
@@ -227,21 +194,10 @@ def main():
         owners = VMW_OWNERS
 
     else:
-        raise Exception("Unsupported organization")
-
+        raise Exception("Unsupported org")
 
     for repo in repos:
-        create_codeowners(api, GITHUB_ORG, repo, owners)
-
-
-    print("\n----------------------------------")
-    print("CODEOWNERS Automation Summary")
-    print("----------------------------------")
-    print(f"Repositories checked : {repos_checked}")
-    print(f"CODEOWNERS created   : {created_count}")
-    print(f"Already existed      : {skip_count}")
-    print(f"Errors               : {error_count}")
-    print("----------------------------------\n")
+        create_codeowners(GITHUB_ORG, repo, owners)
 
 
 if __name__ == "__main__":
