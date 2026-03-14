@@ -49,64 +49,45 @@ VMW_REPOS = [
 # GitHub Config
 # -------------------------------
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_ORG = os.getenv("GITHUB_ORG")
-
+GITHUB_TOKEN = "YOUR_TOKEN"
+GITHUB_ORG = "tornado"
 GITHUB_BASE = "https://github.ibm.com/api/v3"
 
 SLEEP_INTERVAL = 0.3
 
-# -------------------------------
-# GitHub Client
-# -------------------------------
+session = requests.Session()
+session.headers.update({
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json"
+})
 
-class GitHubAPIClient:
-
-    def __init__(self, base_url, token):
-        self.base_url = base_url
-        self.session = requests.Session()
-
-        self.session.headers.update({
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        })
-
-    def get(self, endpoint, allow_404=False):
-
-        url = self.base_url + endpoint
-        resp = self.session.get(url)
-
-        if allow_404 and resp.status_code == 404:
-            return None
-
-        resp.raise_for_status()
-        return resp.json()
-
-    def put(self, endpoint, data):
-
-        url = self.base_url + endpoint
-        resp = self.session.put(url, json=data)
-
-        resp.raise_for_status()
-        return resp.json()
 
 # -------------------------------
-# Metadata Templates
+# Helpers
 # -------------------------------
 
-def build_metadata(service, prod=False):
+def get_default_branch(repo):
 
-    if prod:
-        return {
-            "service": service,
-            "production_code": "yes",
-            "production_branches": ["master"],
-            "security_sensitive": "no",
-            "ip_sensitive": "no",
-            "allow_cloud_readers": "yes"
-        }
+    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}"
+    r = session.get(url)
 
-    return {
+    if r.status_code != 200:
+        raise Exception("Cannot fetch repo")
+
+    return r.json()["default_branch"]
+
+
+def metadata_exists(repo, branch):
+
+    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.metadata?ref={branch}"
+    r = session.get(url)
+
+    return r.status_code == 200
+
+
+def create_metadata(repo, branch, service):
+
+    metadata = {
         "service": service,
         "production_code": "No",
         "production_branches": [""],
@@ -115,30 +96,34 @@ def build_metadata(service, prod=False):
         "allow_cloud_readers": "yes"
     }
 
-# -------------------------------
-# Helpers
-# -------------------------------
+    encoded = base64.b64encode(
+        json.dumps(metadata, indent=2).encode()
+    ).decode()
 
-def get_default_branch(api, org, repo):
+    data = {
+        "message": "Add .metadata file",
+        "content": encoded,
+        "branch": branch
+    }
 
-    repo_info = api.get(f"/repos/{org}/{repo}")
-    return repo_info["default_branch"]
+    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.metadata"
+
+    r = session.put(url, json=data)
+
+    if r.status_code == 201:
+        print(f"SUCCESS: .metadata created -> {repo}")
+
+    elif r.status_code == 409:
+        print(f"SKIP already exists -> {repo}")
+
+    elif r.status_code == 403:
+        print(f"NO PERMISSION -> {repo}")
+
+    else:
+        print(f"ERROR {repo}: {r.status_code}")
 
 
-def metadata_exists(api, org, repo, branch):
-
-    result = api.get(
-        f"/repos/{org}/{repo}/contents/.metadata?ref={branch}",
-        allow_404=True
-    )
-
-    return bool(result)
-
-# -------------------------------
-# Metadata Creation
-# -------------------------------
-
-def process_repo(api, org, repo, service):
+def process_repo(repo, service):
 
     repo_lower = repo.lower()
 
@@ -150,36 +135,24 @@ def process_repo(api, org, repo, service):
         print(f"SKIP vcd repo: {repo}")
         return
 
-    default_branch = get_default_branch(api, org, repo)
+    try:
+        branch = get_default_branch(repo)
 
-    if default_branch == "main":
-        print(f"SKIP main branch repo: {repo}")
-        return
+        if branch == "main":
+            print(f"SKIP main branch repo: {repo}")
+            return
 
-    if metadata_exists(api, org, repo, default_branch):
-        print(f"SKIP metadata exists: {repo}")
-        return
+        if metadata_exists(repo, branch):
+            print(f"SKIP metadata exists: {repo}")
+            return
 
-    metadata = build_metadata(service, prod=False)
+        create_metadata(repo, branch, service)
 
-    encoded = base64.b64encode(
-        json.dumps(metadata, indent=2).encode()
-    ).decode()
+        time.sleep(SLEEP_INTERVAL)
 
-    data = {
-        "message": "Add .metadata file",
-        "content": encoded,
-        "branch": default_branch
-    }
+    except Exception as e:
+        print(f"ERROR {repo}: {str(e)}")
 
-    api.put(
-        f"/repos/{org}/{repo}/contents/.metadata",
-        data
-    )
-
-    print(f"SUCCESS: .metadata created -> {repo}")
-
-    time.sleep(SLEEP_INTERVAL)
 
 # -------------------------------
 # Main
@@ -187,23 +160,15 @@ def process_repo(api, org, repo, service):
 
 def main():
 
-    api = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
-
-    print("\nProcessing Tornado (Gen1)...\n")
+    print("\nProcessing Tornado repos...\n")
 
     for repo in TORNADO_REPOS:
-        try:
-            process_repo(api, GITHUB_ORG, repo, "vmware-solutions")
-        except Exception as e:
-            print(f"ERROR {repo}: {e}")
+        process_repo(repo, "vmware-solutions")
 
-    print("\nProcessing VMW (Gen2)...\n")
+    print("\nProcessing VMW repos...\n")
 
     for repo in VMW_REPOS:
-        try:
-            process_repo(api, GITHUB_ORG, repo, "vmware")
-        except Exception as e:
-            print(f"ERROR {repo}: {e}")
+        process_repo(repo, "vmware")
 
 
 if __name__ == "__main__":
