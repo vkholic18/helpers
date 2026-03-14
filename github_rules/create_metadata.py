@@ -49,8 +49,9 @@ VMW_REPOS = [
 # GitHub Config
 # -------------------------------
 
-GITHUB_TOKEN = "YOUR_TOKEN"
-GITHUB_ORG = "tornado"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_ORG = os.getenv("GITHUB_ORG")
+
 GITHUB_BASE = "https://github.ibm.com/api/v3"
 
 SLEEP_INTERVAL = 0.3
