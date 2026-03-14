@@ -51,6 +51,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_ORG = os.getenv("GITHUB_ORG")
 
 GITHUB_BASE = "https://github.ibm.com/api/v3"
+GITHUB_WEB = "https://github.ibm.com"
 
 SLEEP_INTERVAL = 0.3
 
@@ -64,12 +65,11 @@ class GitHubAPIClient:
     def __init__(self, base_url, token):
 
         self.base_url = base_url
-        self.token = token
 
         self.session = requests.Session()
 
         self.session.headers.update({
-            "Authorization": f"token {self.token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         })
 
@@ -108,21 +108,28 @@ class GitHubAPIClient:
 
 def codeowners_exists(api, org, repo, branch="master"):
 
-    locations = {
-        ".github/CODEOWNERS": f"/repos/{org}/{repo}/contents/.github/CODEOWNERS?ref={branch}",
-        "root/CODEOWNERS": f"/repos/{org}/{repo}/contents/CODEOWNERS?ref={branch}",
-        "docs/CODEOWNERS": f"/repos/{org}/{repo}/contents/docs/CODEOWNERS?ref={branch}",
-    }
+    locations = [
+        f"/repos/{org}/{repo}/contents/.github/CODEOWNERS?ref={branch}",
+        f"/repos/{org}/{repo}/contents/CODEOWNERS?ref={branch}",
+        f"/repos/{org}/{repo}/contents/docs/CODEOWNERS?ref={branch}",
+    ]
 
-    for location, url in locations.items():
+    for endpoint in locations:
 
-        result = api.get(url, allow_404=True)
+        result = api.get(endpoint, allow_404=True)
 
         time.sleep(SLEEP_INTERVAL)
 
         if result is not None:
 
-            print(f"SKIP: CODEOWNERS already exists for {repo} at {location}")
+            file_path = result.get("path", "unknown")
+
+            full_repo_path = f"{org}/{repo}/{file_path}"
+
+            github_url = f"{GITHUB_WEB}/{org}/{repo}/blob/{branch}/{file_path}"
+
+            print(f"SKIP: CODEOWNERS exists at {full_repo_path}")
+            print(f"      URL: {github_url}")
 
             return True
 
@@ -133,35 +140,34 @@ def codeowners_exists(api, org, repo, branch="master"):
 # Create CODEOWNERS
 # -------------------------------
 
-def create_codeowners(api, org, repo, owners, branch="master", dry_run=False):
+def create_codeowners(api, org, repo, owners, branch="master"):
 
     try:
 
         if codeowners_exists(api, org, repo, branch):
-
             return
 
         codeowners_content = "* " + " ".join(owners) + "\n"
 
-        url = f"/repos/{org}/{repo}/contents/.github/CODEOWNERS"
+        encoded = base64.b64encode(codeowners_content.encode()).decode()
+
+        endpoint = f"/repos/{org}/{repo}/contents/.github/CODEOWNERS"
 
         data = {
             "message": "Add CODEOWNERS file for compliance",
-            "content": base64.b64encode(codeowners_content.encode()).decode(),
+            "content": encoded,
             "branch": branch
         }
 
-        if dry_run:
-
-            print(f"DRY RUN: Would create CODEOWNERS for {repo}")
-            return
-
-
-        resp = api.put(url, data)
+        resp = api.put(endpoint, data)
 
         if resp and resp.get("content"):
 
             print(f"SUCCESS: Created CODEOWNERS for {repo}")
+
+            print(
+                f"URL: {GITHUB_WEB}/{org}/{repo}/blob/{branch}/.github/CODEOWNERS"
+            )
 
         else:
 
