@@ -1375,71 +1375,6 @@ class RepoComplianceApplier:
             }
     
     def apply_repo_fixes(self, repo_result):
-                        # Automated .metadata creation for Tornado repos (Non-Prod Gen1)
-                        tornado_missing_metadata = [
-                            "onecloud-tracker", "vcloud", "defect-analysis-tool", "Office-of-the-CTO", "vuln_scan_output", "JIL_MCV_Architecture", "personal_ms", "vcd-jil-test-automation", "foo-repo", "bar-repo", "vcd-test", "skytap-tracker", "vuln_scan_output_nonprod", "MVCS-Documentation", "NextGenVPC", "LOGAN-Documentation", "mvcs-prototype", "mvcs-tracker", "mvcs-mgmt-comm", "mvcs-mgmt-scheduler", "mvcs-mgmt-worker", "mvcs-mgmt-api", "mvcs-ansible", "mvcs-cli", "Isolation", "artemis-teams", "hpo-hipaa-assessment-2020", "vcd-access", "mvcs-change-management", "vcd-infra-comm", "vcd-infra-api", "vcd-infra-worker", "vcd-infra-scheduler", "codescan", "ursula_env", "non-personal-ids", "git-issue-analysis", "vpc-sp", "newrelic-monitor-synthetic", "vpc-veeam", "atlas-github-app-test-repo", "vcd-billing-resubmission-script", "v2t", "vcd-billing-reporting-script", "vcd-billing-cos-reader", "pvs-bur-sp", "vcd-reports-prototype", "console-e2e", "UIAutomationResult", "add-on-services-team", "vcd-language-translation", "PIM_to_Secrete_Manager_ESXI_Automation", "vcd-iaas-vro", "ipops-vcd-dev-request", "auditree_config", "vcd-SF-rev-20221114", "ic4v-evidence-locker", "ic4v-auditree-config", "vmware-sol-locker", "auditree-VCS-evidence-locker", "auditree-VCS", "gen1-evidence-locker-test1", "gen1-auditree-config", "ic4v-patent", "vcf-on-vpc-documentation", "vcd-pscli-veeam", "VCD-Price-change-July2023", "auditree-vuln-scan-output", "svelte-pocs", "advisory", "bss_cloudant_account_compare", "veeam-customer-schedule", "sf-shared-deprecation", "security-scans-config", "security-scans-compliance-issues", "security-scans-compliance-inventory", "security-scans-compliance-evidence", "postgressqlreportresults", "ic4v-data-analytics", "ic4v-data-analytics-common", "ic4v-vrops", "ic4v-platform-team-synlab", "license-expiry-reminder", "logger-agent-config", "onepipeline-compliance-incident-issues", "onepipeline-compliance-evidence-locker", "onepipeline-compliance-inventory", "kmip4hpcs_monitor"
-                        ]
-
-                        # Only add .metadata if missing, never overwrite
-                        if rule_name == "metadata_existing":
-                            # Skip if repo does not match the provided list
-                            if repo_name not in tornado_missing_metadata:
-                                repo_changes["skipped"].append({
-                                    "rule": rule_name,
-                                    "reason": "Repo not in Tornado missing .metadata list, skipping creation"
-                                })
-                                continue
-                            # Skip if repo starts with vcd- or mvcs-
-                            if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
-                                repo_changes["skipped"].append({
-                                    "rule": rule_name,
-                                    "reason": "Repo starts with vcd- or mvcs-, skipping creation"
-                                })
-                                continue
-                            # Skip if default branch is main
-                            if repo_result.get("default_branch", "master") == "main":
-                                repo_changes["skipped"].append({
-                                    "rule": rule_name,
-                                    "reason": "Default branch is main, skipping creation"
-                                })
-                                continue
-                            # Create Non-Prod Gen1 .metadata content
-                            metadata_content = {
-                                "service": "vmware-solutions",
-                                "production_code": "No",
-                                "production_branches": [""],
-                                "security_sensitive": "no",
-                                "ip_sensitive": "no",
-                                "allow_cloud_readers": "yes"
-                            }
-                            url = f"/repos/{self.org}/{repo_name}/contents/.metadata"
-                            data = {
-                                "message": "Add .metadata file for compliance",
-                                "content": base64.b64encode(json.dumps(metadata_content, indent=2).encode("utf-8")).decode("utf-8"),
-                                "branch": repo_result.get("default_branch", "master")
-                            }
-                            if not self.dry_run:
-                                resp = self.api.put(url, data)
-                                if resp and resp.get("content"):
-                                    repo_changes["changes"].append({
-                                        "rule": rule_name,
-                                        "action": "Created .metadata file",
-                                        "location": "root",
-                                        "success": True
-                                    })
-                                else:
-                                    repo_changes["errors"].append({
-                                        "rule": rule_name,
-                                        "error": "Failed to create .metadata file"
-                                    })
-                            else:
-                                repo_changes["changes"].append({
-                                    "rule": rule_name,
-                                    "action": "(Dry run) Would create .metadata file",
-                                    "location": "root",
-                                    "success": True
-                                })
-                            continue
         """
         Apply fixes for a single repository.
         
@@ -1447,12 +1382,107 @@ class RepoComplianceApplier:
             repo_result: Repository check results
         
         Returns:
-                        })
+            dict: Changes made, errors, and skipped items
+        """
+        repo_name = repo_result["repository"]
+        failed_rules = [r for r in repo_result["rules"] if not r["passed"]]
+        
+        repo_changes = {
+            "repository": repo_name,
+            "changes": [],
+            "errors": [],
+            "skipped": []
+        }
+        
+        # Automated .metadata creation for Tornado repos (Non-Prod Gen1)
+        tornado_missing_metadata = [
+            "onecloud-tracker", "vcloud", "defect-analysis-tool", "Office-of-the-CTO",
+            "vuln_scan_output", "JIL_MCV_Architecture", "personal_ms",
+            "vcd-jil-test-automation", "foo-repo", "bar-repo", "vcd-test",
+            "skytap-tracker", "vuln_scan_output_nonprod", "MVCS-Documentation",
+            "NextGenVPC", "LOGAN-Documentation", "mvcs-prototype", "mvcs-tracker",
+            "mvcs-mgmt-comm", "mvcs-mgmt-scheduler", "mvcs-mgmt-worker",
+            "mvcs-mgmt-api", "mvcs-ansible", "mvcs-cli", "Isolation",
+            "artemis-teams", "hpo-hipaa-assessment-2020", "vcd-access",
+            "mvcs-change-management", "vcd-infra-comm", "vcd-infra-api",
+            "vcd-infra-worker", "vcd-infra-scheduler", "codescan", "ursula_env",
+            "non-personal-ids", "git-issue-analysis", "vpc-sp",
+            "newrelic-monitor-synthetic", "vpc-veeam",
+            "atlas-github-app-test-repo", "vcd-billing-resubmission-script",
+            "v2t", "vcd-billing-reporting-script", "vcd-billing-cos-reader",
+            "pvs-bur-sp", "vcd-reports-prototype", "console-e2e",
+            "UIAutomationResult", "add-on-services-team",
+            "vcd-language-translation",
+            "PIM_to_Secrete_Manager_ESXI_Automation", "vcd-iaas-vro",
+            "ipops-vcd-dev-request", "auditree_config", "vcd-SF-rev-20221114",
+            "ic4v-evidence-locker", "ic4v-auditree-config", "vmware-sol-locker",
+            "auditree-VCS-evidence-locker", "auditree-VCS",
+            "gen1-evidence-locker-test1", "gen1-auditree-config", "ic4v-patent",
+            "vcf-on-vpc-documentation", "vcd-pscli-veeam",
+            "VCD-Price-change-July2023", "auditree-vuln-scan-output",
+            "svelte-pocs", "advisory", "bss_cloudant_account_compare",
+            "veeam-customer-schedule", "sf-shared-deprecation",
+            "security-scans-config", "security-scans-compliance-issues",
+            "security-scans-compliance-inventory",
+            "security-scans-compliance-evidence", "postgressqlreportresults",
+            "ic4v-data-analytics", "ic4v-data-analytics-common", "ic4v-vrops",
+            "ic4v-platform-team-synlab", "license-expiry-reminder",
+            "logger-agent-config", "onepipeline-compliance-incident-issues",
+            "onepipeline-compliance-evidence-locker",
+            "onepipeline-compliance-inventory", "kmip4hpcs_monitor"
+        ]
+        
+        for rule in failed_rules:
+            rule_name = rule["rule"]
+            
+            if rule_name == "unsecure_hooks":
+                insecure_hooks = rule.get("insecure_hooks", [])
+                if insecure_hooks:
+                    results = self.fix_unsecure_hooks(repo_name, insecure_hooks)
+                    for result in results:
+                        result["rule"] = rule_name
+                        if result.get("success"):
+                            repo_changes["changes"].append(result)
+                        else:
+                            repo_changes["errors"].append(result)
+            
+            elif rule_name == "collaborators_in_org":
+                outside_collabs = rule.get("outside_collaborators", [])
+                for username in outside_collabs:
+                    result = self.remove_collaborator(repo_name, username, "outside")
+                    result["rule"] = rule_name
+                    if result.get("success"):
+                        repo_changes["changes"].append(result)
                     else:
                         repo_changes["errors"].append(result)
             
+            elif rule_name == "collaborators_in_team":
+                direct_collabs = rule.get("direct_collaborators", [])
+                for username in direct_collabs:
+                    result = self.remove_collaborator(repo_name, username, "direct")
+                    result["rule"] = rule_name
+                    if result.get("success"):
+                        repo_changes["changes"].append(result)
+                    else:
+                        repo_changes["errors"].append(result)
+            
+            elif rule_name == "shared_repo_readers":
+                result = self.remove_team_access(repo_name, "cloud_readers")
+                result["rule"] = rule_name
+                if result.get("success"):
+                    repo_changes["changes"].append(result)
+                else:
+                    repo_changes["errors"].append(result)
+            
+            elif rule_name == "private_if_sensitive":
+                result = self.make_private(repo_name)
+                result["rule"] = rule_name
+                if result.get("success"):
+                    repo_changes["changes"].append(result)
+                else:
+                    repo_changes["errors"].append(result)
+            
             elif rule_name == "archived_status":
-                # Check if repo needs to be unarchived
                 current_val = rule.get("current_value", "")
                 if "Archived: Yes" in current_val:
                     result = self.unarchive(repo_name)
@@ -1463,10 +1493,61 @@ class RepoComplianceApplier:
                         repo_changes["errors"].append(result)
             
             elif rule_name == "metadata_existing":
-                repo_changes["skipped"].append({
-                    "rule": rule_name,
-                    "reason": "Cannot create .metadata automatically - content must be defined by repository owner"
-                })
+                # Only add .metadata if missing, never overwrite
+                if repo_name not in tornado_missing_metadata:
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Repo not in Tornado missing .metadata list, skipping creation"
+                    })
+                    continue
+                if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Repo starts with vcd- or mvcs-, skipping creation"
+                    })
+                    continue
+                if repo_result.get("default_branch", "master") == "main":
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Default branch is main, skipping creation"
+                    })
+                    continue
+                # Create Non-Prod Gen1 .metadata content
+                metadata_content = {
+                    "service": "vmware-solutions",
+                    "production_code": "No",
+                    "production_branches": [""],
+                    "security_sensitive": "no",
+                    "ip_sensitive": "no",
+                    "allow_cloud_readers": "yes"
+                }
+                url = f"/repos/{self.org}/{repo_name}/contents/.metadata"
+                data = {
+                    "message": "Add .metadata file for compliance",
+                    "content": base64.b64encode(json.dumps(metadata_content, indent=2).encode("utf-8")).decode("utf-8"),
+                    "branch": repo_result.get("default_branch", "master")
+                }
+                if not self.dry_run:
+                    resp = self.api.put(url, data)
+                    if resp and resp.get("content"):
+                        repo_changes["changes"].append({
+                            "rule": rule_name,
+                            "action": "Created .metadata file",
+                            "location": "root",
+                            "success": True
+                        })
+                    else:
+                        repo_changes["errors"].append({
+                            "rule": rule_name,
+                            "error": "Failed to create .metadata file"
+                        })
+                else:
+                    repo_changes["changes"].append({
+                        "rule": rule_name,
+                        "action": "(Dry run) Would create .metadata file",
+                        "location": "root",
+                        "success": True
+                    })
             
             else:
                 repo_changes["skipped"].append({
