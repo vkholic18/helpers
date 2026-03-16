@@ -225,8 +225,11 @@ def main():
         elif resp.status_code == 409:
             path = find_codeowners(GITHUB_ORG, repo, branch)
             if path:
-                print_location(GITHUB_ORG, repo, branch, path, "EXISTS")
+                print_location(GITHUB_ORG, repo, branch, path, "EXISTS (409)")
                 existed += 1
+            else:
+                print(f"CONFLICT: {repo} - 409 but CODEOWNERS not found on '{branch}'")
+                errors += 1
         else:
             print(f"ERROR creating CODEOWNERS for {repo}: {resp.status_code}")
             errors += 1
