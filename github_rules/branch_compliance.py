@@ -438,10 +438,8 @@ class BranchComplianceChecker:
         # Otherwise fetch all repos
         print(f"  Fetching repositories for '{self.org}'...")
         repos = self.api.paginate(f"/orgs/{self.org}/repos?per_page=100")
-        # Filter out archived repos - they can't be updated anyway
-        active_repos = [r for r in repos if not r.get("archived", False)]
-        print(f"    Found {len(active_repos)} active repositories")
-        return active_repos
+        print(f"    Found {len(repos)} repositories")
+        return repos
     
     def fetch_metadata(self, repo_name, default_branch):
         """
