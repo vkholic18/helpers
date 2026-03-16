@@ -825,13 +825,24 @@ class RepoComplianceChecker:
     def check_repository(self, repo_data):
         """
         Run all compliance checks on a single repository.
+        Skips archived repos and repos with default branch 'main'.
         
-        Returns dict with all rule results for this repository.
+        Returns dict with all rule results for this repository, or None if skipped.
         """
         repo_name = repo_data["name"]
         default_branch = repo_data.get("default_branch", "master")
         
         print(f"    Checking: {repo_name}")
+
+        # Skip archived repos
+        if repo_data.get("archived", False):
+            print(f"      SKIP: archived repo: {repo_name}")
+            return None
+
+        # Skip repos with default branch 'main'
+        if default_branch == "main":
+            print(f"      SKIP: default branch is 'main': {repo_name}")
+            return None
         
         # Fetch metadata first (used by multiple rules)
         metadata = self.fetch_metadata(repo_name, default_branch)
@@ -870,10 +881,15 @@ class RepoComplianceChecker:
         repos = self.get_repositories()
         
         print(f"\n  Checking {len(repos)} repositories...")
+        skipped_count = 0
         for repo in repos:
             result = self.check_repository(repo)
-            self.results.append(result)
+            if result:
+                self.results.append(result)
+            else:
+                skipped_count += 1
         
+        print(f"\n  Checked {len(self.results)} repositories, skipped {skipped_count} (archived or default branch 'main')")
         return self.results
 
 
@@ -1431,151 +1447,6 @@ class RepoComplianceApplier:
             repo_result: Repository check results
         
         Returns:
-            dict: Summary of changes for this repo
-        """
-        repo_name = repo_result["repository"]
-        repo_changes = {
-            "repository": repo_name,
-            "changes": [],
-            "errors": [],
-            "skipped": []
-        }
-        
-        failed_rules = [r for r in repo_result["rules"] if not r["passed"]]
-        
-        for rule in failed_rules:
-            rule_name = rule["rule"]
-            
-            if rule_name == "unsecure_hooks":
-                insecure_hooks = rule.get("insecure_hooks", [])
-                if insecure_hooks:
-                    results = self.fix_unsecure_hooks(repo_name, insecure_hooks)
-                    for r in results:
-                        if r.get("success"):
-                            repo_changes["changes"].append(r)
-                        else:
-                            repo_changes["errors"].append(r)
-            
-            elif rule_name == "collaborators_in_org":
-                outside_collabs = rule.get("outside_collaborators", [])
-                for username in outside_collabs:
-                    result = self.remove_collaborator(repo_name, username, "outside")
-                    if result.get("success"):
-                        repo_changes["changes"].append(result)
-                    else:
-                        repo_changes["errors"].append(result)
-            
-            elif rule_name == "collaborators_in_team":
-                direct_collabs = rule.get("direct_collaborators", [])
-                for username in direct_collabs:
-                    result = self.remove_collaborator(repo_name, username, "direct")
-                    if result.get("success"):
-                        repo_changes["changes"].append(result)
-                    else:
-                        repo_changes["errors"].append(result)
-            
-            elif rule_name == "shared_repo_readers":
-                # Check if Cloud_Readers should be removed
-                current_val = rule.get("current_value", "")
-                if "Cloud_Readers: Yes" in current_val:
-                    result = self.remove_team_access(repo_name, "cloud_readers")
-                    if result.get("success"):
-                        repo_changes["changes"].append(result)
-                    else:
-                        repo_changes["errors"].append(result)
-            
-            elif rule_name == "private_if_sensitive":
-                # Check if repo should be made private
-                current_val = rule.get("current_value", "")
-                if "Private: No" in current_val:
-                    result = self.make_private(repo_name)
-                    result["rule"] = rule_name
-                    if result.get("success"):
-                        repo_changes["changes"].append(result)
-
-            # CODEOWNERS add-only automation (skip if no mapping)
-            elif rule_name == "codeowners_existing":
-                # Only create CODEOWNERS if missing and mapping exists
-                # Owner mapping logic (customize as needed)
-
-                # Tornado and VMW-Solutions repo/owner mapping (from user data)
-                # Unified CODEOWNERS mapping for all Tornado repos (from user data)
-                tornado_repos = [
-                    "common-utils", "build-ci", "bootstrap", "console", "service-framework", "service-implementations", "devops", "mgmt-comm", "mgmt-event", "kmipadapter", "kmipmgmt", "service-broker", "k8s-deploy", "mgmt-cos", "vcd-mgmt-api", "vcd-mgmt-job", "mgmt-metering", "vcd-bin-vdbc", "vcd-tracking-service", "atlas-dashboard", "vcd-mgmt-db", "vcd-billing-service", "vcd-billing-job", "vcd-mgmt-e2e", "skytap-console", "vcd-mgmt-veeam", "mgmt-mq", "images", "schematics", "mgmt-sysdig", "vcd-mgmt-scheduler", "ic4v-golang-sdk", "ic4v-java-sdk", "vcd-metrics-collector", "ic4v-node-sdk", "metrics-ingestor", "managed-portal-and-billing-team", "vcd-iaas-vra", "vcd-vrealize-webhook", "UX-Design", "console_scan", "vpc-msql", "istio-egress-control", "svt-automation-ui", "VRA-G1-FRA-PRD", "VRA-G1-DAL-PRD", "VRA-G1-PAR-PRD", "ipops-vcd-cases", "evidence_locker", "secretsmanager-utils", "IC4V-lifecycle-image", "per-core-licensing", "monitoring", "vcd-metering-reconciliation-patch", "vcd-iaas-vro-g2", "vcd-iaas-vro-g1", "credreconcileresults", "agent-configs", "common-scripts", "core-helper-scripts", "ci-pipeline-defs"
-                ]
-                tornado_owners = [
-                    "@durgadas", "@Vishakha-Sawant3", "@Tushar-Velingkar2", "@Jeetendra-Nayak2", "@Sankalp-Bhat1", "@Shail Kumari", "@Avinash Boini", "@Yvens Pinto"
-                ]
-                vmw_repos = [
-                    "ic4v-flask-lib", "ic4v-sddc", "ic4v-sqlalchemy-lib", "roks-configs", "ic4v-iaas", "ic4v-vmware-cloud-director", "ic4v-iaas-vhost", "ic4v-data", "atlas-dashboard", "ic4v-vdc-lifecycle", "vpc-vmware-terraform", "ic4v-update-vcd", "vpc-vmware-iaas-pub", "VCD-Terraform", "ic4v-license-check-result", "ic4v-metrics-ingestor", "ic4v-sysdig", "devops_tracker", "vpc-observability-terraform", "auditree_evidence_locker", "auditree_config", "change-management", "ic4v-control-plane-iac", "vpc-demo-modules", "vpc-demo-3tier", "auto-infra-devops", "auditree-vuln-scan-output", "ic4v-utils", "vpc-demo-3tier-autoscale", "ic4v-vpc-vsi-roks-bastion", "vpc-demo-hubspoke", "nonprod_auditree_config", "nonprod_auditree_evidence_locker", "ic4v-backup-restore", "ic4v-update-veeam", "ic4v-performance", "ic4v-smm", "ic4v-console", "iaas-mgmt", "onepipeline-compliance-inventory", "ic4v-vcda", "ic4v-reconciliation", "ic4v-licensing", "ic4v-update-vcda", "vcf-vpc-automation", "vcf-vpc-automation-sddc", "ic4v-licensing-service", "ic4v-veeam-kpi-collector", "rmc_xls_part_price_compare", "ic4v-update-usage-meter", "g11n-tracker", "ic4v-cos-sync", "ic4v-licensing-service-billing", "ic4v-vm-operations", "ic4v-licensing-service-iac", "submission_evidence_utils", "ic4v-secrets-operator", "ic4v-secrets-sync", "MT-price-change-202401", "ic4v-ad-learning", "vmaas-terraform", "ic4v-secrets-inventory", "ic4v-sm-migrate", "devtest-compliance", "devtest-compliance-sos", "onepipeline-compliance-evidence-locker", "ic4v-cot", "monitoring", "ic4v-vmc-cli", "ic4v-vmc-cli-ops", "ic4v-logging-demo", "ic4v-srx-template", "ic4v-srx-configs", "ic4v-usage-meter", "ic4v-syslog-demo", "ic4v-um-proxy", "ic4v-vmca-cli", "ic4v-security", "WIP-SLA", "ic4v-governance", "ic4v-srx-configs-change-log", "ic4v-vmc-cli-fake-remote", "ansible-change-log", "ic4v-vmca-edr-installer", "ansible-password-rotation", "doc-separation-test", "ic4v-vmca-playbooks", "openapi-client-generator", "ic4v-governance-automation", "ic4v-vmca-ip-loader", "ic4v-secrets-placeholder-creator", "vm_system_uuid_reset", "ic4v-sos-cli", "ic4v-secrets-operator-v2", "copy_dev_cos_to_stag", "ansible-monitoring", "ansible-health-checks", "ic4v-license-inventory", "PlatformDevOps", "ic4v-usage-meter-proxy", "ic4v-update-vrni", "security-compliance-output", "titan", "ic4v-pipeline-iac", "workernodeupdatelogs", "ic4v-iaas-vpc", "ic4v-license-ui", "icl_alerts", "ic4v-vcfvpc-automation", "ic4v-external-apis-lib", "vcd-iaas-vra", "vcd-iaas-vro-g2", "ic4v-vmca-scripts", "compliance-pipeline-defs", "iaas-vro-g2", "cli-vmaas-plugin", "security-scans-compliance-evidence", "security-scans-compliance-inventory", "ic4v-cos-sync-tekton"
-                ]
-                vmw_owners = [
-                    "@durgadas", "@Shakil-Usgaonker2", "@Tushar-Velingkar2", "@Jeetendra-Nayak2", "@Yvens Pinto", "@Shruti-Vasudeo2", "@Siddhi-Borkar2", "@Prachi-Kamat4", "@Bhushan-Borkar2"
-                ]
-
-                # Check if CODEOWNERS exists (API call)
-                def codeowners_exists():
-                    locations = [
-                        f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS?ref=master",
-                        f"/repos/{self.org}/{repo_name}/contents/docs/CODEOWNERS?ref=master",
-                        f"/repos/{self.org}/{repo_name}/contents/.github/CODEOWNERS?ref=master",
-                    ]
-                    for url in locations:
-                        result = self.api.get(url, allow_404=True)
-                        time.sleep(0.3)
-                        if result:
-                            return True
-                    return False
-
-                if codeowners_exists():
-                    repo_changes["skipped"].append({
-                        "rule": rule_name,
-                        "reason": "CODEOWNERS already exists, will not overwrite"
-                    })
-                else:
-                    if repo_name in tornado_repos:
-                        owners = tornado_owners
-                    elif repo_name in vmw_repos:
-                        owners = vmw_owners
-                    else:
-                        repo_changes["skipped"].append({
-                            "rule": rule_name,
-                            "reason": "No CODEOWNERS mapping for this repo, skipping creation"
-                        })
-                        continue
-                    if not owners:
-                        repo_changes["skipped"].append({
-                            "rule": rule_name,
-                            "reason": "No reviewers listed for this repo, skipping creation"
-                        })
-                        continue
-                    codeowners_content = "* " + " ".join(owners) + "\n"
-                    url = f"/repos/{self.org}/{repo_name}/contents/CODEOWNERS"
-                    data = {
-                        "message": "Add CODEOWNERS file for compliance",
-                        "content": base64.b64encode(codeowners_content.encode("utf-8")).decode("utf-8"),
-                        "branch": "master"
-                    }
-                    if not self.dry_run:
-                        resp = self.api.put(url, data)
-                        if resp and resp.get("content"):
-                            repo_changes["changes"].append({
-                                "rule": rule_name,
-                                "action": "Created CODEOWNERS file",
-                                "location": "root",
-                                "success": True
-                            })
-                        else:
-                            repo_changes["errors"].append({
-                                "rule": rule_name,
-                                "error": "Failed to create CODEOWNERS file"
-                            })
-                    else:
-                        repo_changes["changes"].append({
-                            "rule": rule_name,
-                            "action": "(Dry run) Would create CODEOWNERS file",
-                            "location": "root",
-                            "success": True
                         })
                     else:
                         repo_changes["errors"].append(result)
