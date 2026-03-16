@@ -1113,11 +1113,22 @@ class BranchComplianceChecker:
         Check production branches in a repository for branch protection compliance.
         Implements logic to skip repos if .metadata is only on main, not master, or missing on both.
         Only check repos where .metadata is present on master.
+        Skips archived repos and repos with default branch 'main'.
         """
         repo_name = repo_data["name"]
         # Always try master first
         default_branch = repo_data.get("default_branch", "master")
         print(f"    Checking: {repo_name}")
+
+        # Skip archived repos
+        if repo_data.get("archived", False):
+            print(f"      SKIP: archived repo: {repo_name}")
+            return None
+
+        # Skip repos with default branch 'main'
+        if default_branch == "main":
+            print(f"      SKIP: default branch is 'main': {repo_name}")
+            return None
         metadata = self.fetch_metadata(repo_name, "master")
         if not metadata:
             # Try main if not found on master
