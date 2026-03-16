@@ -1,44 +1,26 @@
 import requests
 import base64
+import json
 import time
 import os
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# -----------------------------
-# Repo Lists
-# -----------------------------
+# Try YAML support (optional, same as branch_compliance.py)
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
-TORNADO_REPOS = [
-"common-utils","build-ci","bootstrap","console","service-framework",
-"service-implementations","devops","mgmt-comm","mgmt-event","kmipadapter",
-"kmipmgmt","service-broker","k8s-deploy","mgmt-cos","vcd-mgmt-api",
-"vcd-mgmt-job","mgmt-metering","vcd-bin-vdbc","vcd-tracking-service",
-"atlas-dashboard","vcd-mgmt-db","vcd-billing-service","vcd-billing-job",
-"vcd-mgmt-e2e","skytap-console","vcd-mgmt-veeam","mgmt-mq","images",
-"schematics","mgmt-sysdig","vcd-mgmt-scheduler","ic4v-golang-sdk",
-"ic4v-java-sdk","vcd-metrics-collector","ic4v-node-sdk","metrics-ingestor",
-"managed-portal-and-billing-team","vcd-iaas-vra","vcd-vrealize-webhook",
-"UX-Design","console_scan","vpc-msql","istio-egress-control",
-"svt-automation-ui","VRA-G1-FRA-PRD","VRA-G1-DAL-PRD","VRA-G1-PAR-PRD",
-"ipops-vcd-cases","evidence_locker","secretsmanager-utils",
-"IC4V-lifecycle-image","per-core-licensing","monitoring",
-"vcd-metering-reconciliation-patch","vcd-iaas-vro-g2","vcd-iaas-vro-g1",
-"credreconcileresults","agent-configs","common-scripts",
-"core-helper-scripts","ci-pipeline-defs"
-]
+# -----------------------------
+# Owners per org
+# -----------------------------
 
 TORNADO_OWNERS = [
 "@durgadas","@Vishakha-Sawant3","@Tushar-Velingkar2",
-"@Jeetendra-Nayak2","@Sankalp-Bhat1","@Yvens Pinto"
-]
-
-VMW_REPOS = [
-"ic4v-flask-lib","ic4v-sddc","ic4v-sqlalchemy-lib","roks-configs",
-"ic4v-iaas","ic4v-vmware-cloud-director","ic4v-iaas-vhost",
-"ic4v-data","atlas-dashboard","ic4v-vdc-lifecycle",
-"vpc-vmware-terraform","ic4v-update-vcd"
+"@Jeetendra-Nayak2","@Sankalp-Bhat1","@Yvens-Pinto"
 ]
 
 VMW_OWNERS = [
@@ -70,21 +52,86 @@ session.headers.update({
 })
 
 # -----------------------------
-# Default branch
+# Pagination helper
 # -----------------------------
 
-def get_default_branch(org, repo):
+def paginate(url):
+    results = []
+    while url:
+        resp = session.get(url, verify=False, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            results.extend(data)
+        else:
+            results.append(data)
+        url = None
+        link_header = resp.headers.get("Link", "")
+        for link in link_header.split(","):
+            if 'rel="next"' in link:
+                url = link.split(";")[0].strip()[1:-1]
+                break
+        time.sleep(SLEEP_INTERVAL)
+    return results
 
-    url = f"{GITHUB_BASE}/repos/{org}/{repo}"
+# -----------------------------
+# Fetch .metadata
+# -----------------------------
 
+def fetch_metadata(org, repo, branch):
+    url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/.metadata?ref={branch}"
     resp = session.get(url, verify=False, timeout=20)
-
     if resp.status_code == 404:
         return None
-
     resp.raise_for_status()
+    try:
+        content = base64.b64decode(resp.json().get("content", "")).decode("utf-8")
+        if YAML_AVAILABLE:
+            try:
+                return yaml.safe_load(content)
+            except:
+                pass
+        return json.loads(content)
+    except:
+        return None
 
-    return resp.json()["default_branch"]
+# -----------------------------
+# Discover production repos
+# -----------------------------
+
+def discover_production_repos(org):
+    print(f"  Fetching all repos from '{org}'...")
+    all_repos = paginate(f"{GITHUB_BASE}/orgs/{org}/repos?per_page=100")
+    print(f"  Found {len(all_repos)} total repos")
+
+    production_repos = []
+    for repo_data in all_repos:
+        name = repo_data["name"]
+        default_branch = repo_data.get("default_branch", "master")
+        archived = repo_data.get("archived", False)
+
+        # Skip archived repos
+        if archived:
+            print(f"    SKIP archived: {name}")
+            continue
+
+        # Skip repos with default branch 'main'
+        if default_branch == "main":
+            print(f"    SKIP default branch 'main': {name}")
+            continue
+
+        # Check .metadata on master for production_code
+        metadata = fetch_metadata(org, name, "master")
+        if not metadata:
+            continue
+
+        production_code = str(metadata.get("production_code", "no")).lower()
+        if production_code == "yes":
+            production_repos.append({"name": name, "default_branch": default_branch})
+            print(f"    PRODUCTION: {name}")
+
+    print(f"\n  Found {len(production_repos)} production repos needing CODEOWNERS check\n")
+    return production_repos
 
 # -----------------------------
 # Detect CODEOWNERS
@@ -127,54 +174,6 @@ def print_location(org, repo, branch, path, status):
     print(f"URL: {url}")
 
 # -----------------------------
-# Create CODEOWNERS
-# -----------------------------
-
-def create_codeowners(org, repo, owners):
-
-    branch = get_default_branch(org, repo)
-
-    if branch is None:
-        print(f"ERROR: {repo} not found")
-        return
-
-    path = find_codeowners(org, repo, branch)
-
-    # exists
-    if path:
-        print_location(org, repo, branch, path, "EXISTS")
-        return
-
-    # create
-    content = "* " + " ".join(owners) + "\n"
-
-    url = f"{GITHUB_BASE}/repos/{org}/{repo}/contents/.github/CODEOWNERS"
-
-    data = {
-        "message": "Add CODEOWNERS for compliance",
-        "content": base64.b64encode(content.encode()).decode(),
-        "branch": branch
-    }
-
-    resp = session.put(url, json=data, verify=False, timeout=20)
-
-    if resp.status_code in (200,201):
-
-        print_location(org, repo, branch, ".github/CODEOWNERS", "CREATED")
-
-    elif resp.status_code == 409:
-
-        path = find_codeowners(org, repo, branch)
-
-        if path:
-            print_location(org, repo, branch, path, "EXISTS")
-
-    else:
-
-        print(f"ERROR creating CODEOWNERS for {repo}")
-        print(resp.text)
-
-# -----------------------------
 # Main
 # -----------------------------
 
@@ -186,18 +185,57 @@ def main():
     print(f"\nRunning CODEOWNERS check for org: {GITHUB_ORG}\n")
 
     if GITHUB_ORG == "tornado":
-        repos = TORNADO_REPOS
         owners = TORNADO_OWNERS
-
     elif GITHUB_ORG == "vmwsolutions":
-        repos = VMW_REPOS
         owners = VMW_OWNERS
-
     else:
-        raise Exception("Unsupported org")
+        raise Exception("Unsupported org. Use tornado or vmwsolutions.")
 
-    for repo in repos:
-        create_codeowners(GITHUB_ORG, repo, owners)
+    # Dynamically discover all production repos
+    repos = discover_production_repos(GITHUB_ORG)
+
+    created = 0
+    existed = 0
+    errors = 0
+
+    for repo_info in repos:
+        repo = repo_info["name"]
+        branch = repo_info["default_branch"]
+
+        path = find_codeowners(GITHUB_ORG, repo, branch)
+
+        if path:
+            print_location(GITHUB_ORG, repo, branch, path, "EXISTS")
+            existed += 1
+            continue
+
+        # Create CODEOWNERS
+        content = "* " + " ".join(owners) + "\n"
+        url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.github/CODEOWNERS"
+        data = {
+            "message": "Add CODEOWNERS for compliance",
+            "content": base64.b64encode(content.encode()).decode(),
+            "branch": branch
+        }
+        resp = session.put(url, json=data, verify=False, timeout=20)
+
+        if resp.status_code in (200, 201):
+            print_location(GITHUB_ORG, repo, branch, ".github/CODEOWNERS", "CREATED")
+            created += 1
+        elif resp.status_code == 409:
+            path = find_codeowners(GITHUB_ORG, repo, branch)
+            if path:
+                print_location(GITHUB_ORG, repo, branch, path, "EXISTS")
+                existed += 1
+        else:
+            print(f"ERROR creating CODEOWNERS for {repo}: {resp.status_code}")
+            errors += 1
+
+    print(f"\n--- Summary ---")
+    print(f"  Production repos found: {len(repos)}")
+    print(f"  CODEOWNERS already existed: {existed}")
+    print(f"  CODEOWNERS created: {created}")
+    print(f"  Errors: {errors}")
 
 
 if __name__ == "__main__":
