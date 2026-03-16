@@ -209,12 +209,15 @@ def main():
             existed += 1
             continue
 
-        # Create CODEOWNERS
+        # Create CODEOWNERS - try .github/ first, fall back to root
         content = "* " + " ".join(owners) + "\n"
+        encoded = base64.b64encode(content.encode()).decode()
+
+        # Try .github/CODEOWNERS first
         url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/.github/CODEOWNERS"
         data = {
             "message": "Add CODEOWNERS for compliance",
-            "content": base64.b64encode(content.encode()).decode(),
+            "content": encoded,
             "branch": branch
         }
         resp = session.put(url, json=data, verify=False, timeout=20)
@@ -223,12 +226,15 @@ def main():
             print_location(GITHUB_ORG, repo, branch, ".github/CODEOWNERS", "CREATED")
             created += 1
         elif resp.status_code == 409:
-            path = find_codeowners(GITHUB_ORG, repo, branch)
-            if path:
-                print_location(GITHUB_ORG, repo, branch, path, "EXISTS (409)")
-                existed += 1
+            # .github/ path conflicted, try root CODEOWNERS instead
+            url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo}/contents/CODEOWNERS"
+            data["message"] = "Add CODEOWNERS for compliance (root)"
+            resp2 = session.put(url, json=data, verify=False, timeout=20)
+            if resp2.status_code in (200, 201):
+                print_location(GITHUB_ORG, repo, branch, "CODEOWNERS", "CREATED (root)")
+                created += 1
             else:
-                print(f"CONFLICT: {repo} - 409 but CODEOWNERS not found on '{branch}'")
+                print(f"CONFLICT: {repo} - .github/ got 409, root got {resp2.status_code}")
                 errors += 1
         else:
             print(f"ERROR creating CODEOWNERS for {repo}: {resp.status_code}")
