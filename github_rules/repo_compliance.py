@@ -1,9 +1,9 @@
 """
 ================================================================================
-ORGANIZATION-LEVEL COMPLIANCE CHECKER
+REPOSITORY-LEVEL COMPLIANCE CHECKER
 ================================================================================
 
-This script checks organization-level settings against IBM CISO policy requirements.
+This script checks repository-level settings against IBM CISO policy requirements.
 
 HOW TO RUN:
     1. Set environment variables:
@@ -11,67 +11,59 @@ HOW TO RUN:
        - GITHUB_ORG: Organization name to check
        - GITHUB_BASE: GitHub API base URL (e.g., https://api.github.example.com)
     
-    2. Run: python org_compliance.py
+    2. Run: python repo_compliance.py
     
     3. Output files will be generated:
-       - org_compliance_report.json
-       - org_compliance_report.md
-       - org_compliance_report.xlsx
+       - repo_compliance_report.json
+       - repo_compliance_report.md
+       - repo_compliance_report.xlsx
 
 RULES CHECKED (Reference: IBM Cloud Policy 3.1.3, 3.1.4, ITSS Chapter 2):
 
 REQUIRED RULES:
 ---------------
-1. default_repository_permission
-   - Setting: Base permissions (Member privileges section)
-   - Required Value: "No permission"
-   - How we check: API field "default_repository_permission" must equal "none"
-   - Why: Other values allow members to read all private repositories by default.
-
-2. org_outside_collaborators  
-   - Setting: Allow repository administrators to add outside collaborators
-   - Required Value: Disabled
-   - How we check: API field "members_can_invite_outside_collaborators" must be False
-   - Why: All access must be through teams managed in AccessHub.
-
-3. unsecure_org_hooks
-   - Setting: SSL verification on organization webhooks
+1. unsecure_hooks
+   - Setting: SSL verification on repository webhooks
    - Required Value: Enable SSL verification
-   - How we check: Fetch /orgs/{org}/hooks and check each hook's config.insecure_ssl must be 0/False/None
-   - Why: Needed to maintain confidentiality of webhook data in transit.
+   - How we check: Fetch /repos/{owner}/{repo}/hooks, check config.insecure_ssl = 0/False
+   - Why: Webhooks without SSL can leak sensitive data.
 
-RECOMMENDED RULES:
-------------------
-4. members_can_create_public_repositories
-   - Setting: Repository Creation (Member privileges section)
-   - Recommended Value: Private (only)
-   - How we check: API field "members_can_create_public_repositories" should be False
-   - Why: Prevents accidental public exposure of sensitive code.
+2. collaborators_in_org
+   - Setting: No outside collaborators
+   - Required Value: None
+   - How we check: Fetch /repos/{owner}/{repo}/collaborators?affiliation=outside
+   - Why: All access must be through AccessHub teams, not individual outside users.
 
-5. visibility_change_disabled
-   - Setting: Allow members to change repository visibilities
-   - Recommended Value: Disabled
-   - How we check: API field "members_can_change_repo_visibility" should be False
-   - Why: Prevents accidental visibility changes that could expose private code.
+3. collaborators_in_team
+   - Setting: No direct collaborators (individual users)
+   - Required Value: None
+   - How we check: Fetch /repos/{owner}/{repo}/collaborators?affiliation=direct
+   - Why: All access must be through teams, not individual org members added directly.
 
-6. delete_transfer_disabled
-   - Setting: Allow members to delete or transfer repositories
-   - Recommended Value: Disabled
-   - How we check: API field "members_can_delete_repositories" should be False
-   - Why: Limits accidental or malicious deletion/removal of repositories.
+4. shared_repo_readers
+   - Setting: Cloud_Readers team access
+   - Required Value: Not granted for public/IP-sensitive/security-sensitive repos
+   - How we check: Fetch /repos/{owner}/{repo}/teams, check for Cloud_Readers
+                   Also check .metadata for ip_sensitive/security_sensitive flags
+   - Why: Cloud_Readers is meaningless for public repos; sensitive repos shouldn't be shared.
 
-7. team_creation_disabled
-   - Setting: Allow members to create teams
-   - Recommended Value: Disabled
-   - How we check: API field "members_can_create_teams" should be False
-   - Why: Ensures access management through AccessHub is not subverted.
+5. metadata_existing
+   - Setting: .metadata file
+   - Required Value: Exists in root of default branch
+   - How we check: Fetch /repos/{owner}/{repo}/contents/.metadata?ref={default_branch}
+   - Why: Required for repository tracking and compliance verification.
 
-8. admin_activity_6_months
-   - Setting: Organization admins should have recent activity
-   - Recommended Value: Activity within last 6 months
-   - How we check: Fetch /orgs/{org}/members?role=admin and check each admin's
-     /users/{login}/events for recent activity
-   - Why: Inactive admins indicate poor access governance and revalidation.
+6. private_if_sensitive
+   - Setting: Repository visibility
+   - Required Value: Private if contains production/IP-sensitive/security-sensitive code
+   - How we check: Check repo.private against .metadata flags
+   - Why: Sensitive code must not be exposed publicly.
+
+7. archived_status
+   - Setting: Repository archived state
+   - Required Value: Not archived if production code is active
+   - How we check: Check repo.archived against .metadata production_code flags
+   - Why: Active production repos must not be archived.
 
 Author: GitHub Compliance Team
 Last Updated: 2024
@@ -82,17 +74,25 @@ import os
 import sys
 import json
 import time
+import base64
 import argparse
 import requests
 import urllib3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 # Disable SSL warnings for GHE with self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Excel support (required for report generation)
+# Excel support
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+# YAML support (optional)
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
 
 # =============================================================================
@@ -104,7 +104,7 @@ GITHUB_ORG = os.environ.get("GITHUB_ORG")
 GITHUB_BASE = os.environ.get("GITHUB_BASE", "https://api.github.com")
 
 # API settings
-SLEEP_INTERVAL = 0.3  # Delay between API calls to avoid rate limiting
+SLEEP_INTERVAL = 0.3  # Delay between API calls
 
 
 # =============================================================================
@@ -124,16 +124,7 @@ class GitHubAPIClient:
         }
     
     def get(self, endpoint, allow_404=False):
-        """
-        Make a GET request to the GitHub API.
-        
-        Args:
-            endpoint: API endpoint (e.g., /orgs/myorg)
-            allow_404: If True, return None for 404 errors instead of raising
-        
-        Returns:
-            dict or list: JSON response data
-        """
+        """Make a GET request to the GitHub API."""
         url = f"{self.base_url}{endpoint}"
         response = requests.get(url, headers=self.headers, verify=False)
         
@@ -144,15 +135,7 @@ class GitHubAPIClient:
         return response.json()
     
     def paginate(self, endpoint):
-        """
-        Fetch all pages of a paginated API endpoint.
-        
-        Args:
-            endpoint: API endpoint with pagination support
-        
-        Returns:
-            list: All items from all pages
-        """
+        """Fetch all pages of a paginated API endpoint."""
         results = []
         url = f"{self.base_url}{endpoint}"
         
@@ -166,7 +149,6 @@ class GitHubAPIClient:
             else:
                 results.append(data)
             
-            # Get next page URL from Link header
             url = None
             link_header = response.headers.get("Link", "")
             for link in link_header.split(","):
@@ -198,7 +180,7 @@ class GitHubAPIClient:
         """
         Make a PATCH request to the GitHub API.
         
-        Used for updating organization settings.
+        Used for updating repository settings.
         
         Args:
             endpoint: API endpoint path
@@ -226,19 +208,6 @@ class GitHubAPIClient:
         response = requests.delete(url, headers=self.headers, verify=False)
         response.raise_for_status()
         return True
-
-
-# =============================================================================
-# YAML SUPPORT
-# =============================================================================
-
-try:
-    import yaml
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
-
-import base64
 
 
 # =============================================================================
@@ -341,10 +310,16 @@ class OrgQualificationChecker:
         
         for repo in self.all_repos:
             repo_name = repo["name"]
-            default_branch = repo.get("default_branch", "main")
-            
+            default_branch = repo.get("default_branch", "master")
+            # Skip repos with main as default branch
+            if default_branch == "main":
+                print(f"    SKIP: {repo_name} (default branch is 'main')")
+                continue
+            # Skip repos starting with vcd- or mvcs-
+            if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
+                print(f"    SKIP: {repo_name} (repo name starts with vcd- or mvcs-)")
+                continue
             metadata = self.fetch_metadata(repo_name, default_branch)
-            
             if self.is_repo_sensitive(metadata):
                 sensitivity_reasons = []
                 if metadata:
@@ -354,7 +329,6 @@ class OrgQualificationChecker:
                         sensitivity_reasons.append("ip_sensitive")
                     if str(metadata.get("security_sensitive", "no")).lower() == "yes":
                         sensitivity_reasons.append("security_sensitive")
-                
                 self.sensitive_repos.append({
                     "repository": repo_name,
                     "reasons": sensitivity_reasons
@@ -389,441 +363,533 @@ class OrgQualificationChecker:
 
 
 # =============================================================================
-# ORGANIZATION COMPLIANCE CHECKER
+# REPOSITORY COMPLIANCE CHECKER
 # =============================================================================
 
-class OrgComplianceChecker:
+class RepoComplianceChecker:
     """
-    Checks organization-level settings against IBM CISO policy requirements.
+    Checks repository-level settings against IBM CISO policy requirements.
     """
     
     def __init__(self, api_client, org_name):
         self.api = api_client
         self.org = org_name
-        self.org_data = None
         self.results = []
     
-    def fetch_org_settings(self):
+    def get_repositories(self, include_archived=True):
         """
-        Fetch organization settings from GitHub API.
+        Fetch all repositories in the organization.
         
-        API Call: GET /orgs/{org}
-        Returns organization details including all settings we need to check.
+        API Call: GET /orgs/{org}/repos?per_page=100
+        
+        We check ALL repositories including archived ones because archived
+        repos might still need compliance verification.
         """
-        print(f"  Fetching organization settings for '{self.org}'...")
-        self.org_data = self.api.get(f"/orgs/{self.org}")
-        return self.org_data
+        print(f"  Fetching repositories for '{self.org}'...")
+        repos = self.api.paginate(f"/orgs/{self.org}/repos?per_page=100")
+        print(f"    Found {len(repos)} repositories")
+        return repos
+    
+    def fetch_metadata(self, repo_name, default_branch):
+        """
+        Fetch and parse .metadata file from repository, with retry logic for connection errors.
+        """
+        url = f"/repos/{self.org}/{repo_name}/contents/.metadata?ref={default_branch}"
+        retries = 3
+        for attempt in range(retries):
+            try:
+                response = self.api.get(url, allow_404=True)
+                time.sleep(SLEEP_INTERVAL)
+                if not response:
+                    return None
+                content = base64.b64decode(response.get("content", "")).decode("utf-8")
+                if YAML_AVAILABLE:
+                    try:
+                        return yaml.safe_load(content)
+                    except:
+                        pass
+                try:
+                    return json.loads(content)
+                except:
+                    pass
+                return None
+            except requests.exceptions.ConnectionError as e:
+                print(f"      WARNING: Connection error fetching .metadata for {repo_name} (attempt {attempt+1}/{retries}): {e}")
+                time.sleep(2)
+        return None
     
     # =========================================================================
     # REQUIRED RULES
     # =========================================================================
     
-    def check_default_repository_permission(self):
+    def check_unsecure_hooks(self, repo_name):
         """
-        REQUIRED RULE: default_repository_permission
+        REQUIRED RULE: unsecure_hooks
         
         HOW WE APPLY THIS RULE:
         -----------------------
-        1. We read the "default_repository_permission" field from org settings
-        2. This field can be: "none", "read", "write", or "admin"
-        3. We check if it equals "none"
-        4. If not "none", members can read all private repos by default - VIOLATION
+        1. Fetch webhooks via GET /repos/{org}/{repo}/hooks
+        2. For each webhook, examine config.insecure_ssl field
+        3. insecure_ssl values:
+           - "0", 0, False, None = SSL ENABLED (good)
+           - "1", 1, True = SSL DISABLED (bad)
+        4. Collect all hooks with SSL disabled
+        5. Rule passes if no hooks have SSL disabled
         
-        Setting Location in GitHub UI: 
-            Organization Settings > Member privileges > Base permissions
-        
-        API Field: default_repository_permission
-        Expected Value: "none"
-        """
-        print("    Checking: default_repository_permission (REQUIRED)")
-        
-        # Get current value from organization settings
-        current = self.org_data.get("default_repository_permission", "read")
-        expected = "none"
-        passed = current == expected
-        
-        result = {
-            "rule": "default_repository_permission",
-            "passed": passed,
-            "current_value": current,
-            "expected_value": expected,
-            "enforcement": "Required",
-            "reason": (
-                f"Base permissions is set to '{current}'. Must be 'No permission' (none). "
-                "Other values allow all organization members to read private repositories."
-                if not passed else
-                "Base permissions correctly set to 'No permission'."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_org_outside_collaborators(self):
-        """
-        REQUIRED RULE: org_outside_collaborators
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. We read "members_can_invite_outside_collaborators" from org settings
-        2. This boolean indicates if repo admins can add outside collaborators
-        3. We check if it is False (disabled)
-        4. If True, repo admins can add non-org members directly - VIOLATION
-        
-        Setting Location in GitHub UI:
-            Organization Settings > Member privileges > 
-            "Allow repository administrators to add outside collaborators"
-        
-        API Field: members_can_invite_outside_collaborators
-        Expected Value: False
-        """
-        print("    Checking: org_outside_collaborators (REQUIRED)")
-        
-        # Get current value - True means admins CAN add outside collaborators
-        can_invite = self.org_data.get("members_can_invite_outside_collaborators", True)
-        passed = not can_invite
-        
-        result = {
-            "rule": "org_outside_collaborators",
-            "passed": passed,
-            "current_value": "Enabled" if can_invite else "Disabled",
-            "expected_value": "Disabled",
-            "enforcement": "Required",
-            "reason": (
-                "Outside collaborators can be added by repository administrators. "
-                "This must be disabled - all access should be through AccessHub teams."
-                if not passed else
-                "Outside collaborators cannot be added by repository administrators."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_unsecure_org_hooks(self):
-        """
-        REQUIRED RULE: unsecure_org_hooks
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. We fetch all organization webhooks via GET /orgs/{org}/hooks
-        2. For each hook, we examine config.insecure_ssl field
-        3. insecure_ssl should be "0", 0, False, or None (meaning SSL IS enabled)
-        4. If insecure_ssl is "1", 1, or True - SSL is DISABLED - VIOLATION
-        5. We collect all hooks with SSL disabled and report them
-        
-        Setting Location in GitHub UI:
-            Organization Settings > Webhooks > [each webhook] > SSL verification
-        
-        API Endpoint: GET /orgs/{org}/hooks
+        API Endpoint: GET /repos/{org}/{repo}/hooks
         Check Field: config.insecure_ssl
-        Expected Value: "0" or 0 or False (meaning SSL verification is enabled)
+        Expected: "0" or 0 or False (meaning SSL is enabled)
         
-        Note: The field name is confusing - "insecure_ssl=1" means SSL is DISABLED
+        Why this matters:
+        - Webhooks send repository data to external URLs
+        - Without SSL, this data could be intercepted
+        - Confidentiality of code and events would be compromised
         """
-        print("    Checking: unsecure_org_hooks (REQUIRED)")
-        
-        # Fetch all organization webhooks
-        hooks = self.api.get(f"/orgs/{self.org}/hooks", allow_404=True) or []
+        hooks = self.api.get(f"/repos/{self.org}/{repo_name}/hooks", allow_404=True) or []
         time.sleep(SLEEP_INTERVAL)
         
-        # Find hooks with SSL verification disabled
-        # insecure_ssl = "1" or 1 or True means SSL is DISABLED (bad)
-        # insecure_ssl = "0" or 0 or False or None means SSL is ENABLED (good)
+        # Find hooks where SSL verification is disabled
+        # config.insecure_ssl = "1" or 1 or True means SSL is DISABLED
         insecure_hooks = []
         for hook in hooks:
             config = hook.get("config", {})
             insecure_ssl = config.get("insecure_ssl")
             
-            # Check if SSL is disabled
             if insecure_ssl not in (None, "0", 0, False):
                 insecure_hooks.append({
                     "id": hook["id"],
                     "name": hook.get("name", "unknown"),
-                    "url": config.get("url", "N/A"),
-                    "insecure_ssl": insecure_ssl
+                    "url": config.get("url", "N/A")
                 })
         
         passed = len(insecure_hooks) == 0
         
-        result = {
-            "rule": "unsecure_org_hooks",
+        return {
+            "rule": "unsecure_hooks",
             "passed": passed,
             "current_value": f"{len(insecure_hooks)} hooks with SSL disabled",
             "expected_value": "0 hooks with SSL disabled",
             "enforcement": "Required",
             "insecure_hooks": insecure_hooks,
             "reason": (
-                f"Found {len(insecure_hooks)} webhook(s) without SSL verification. "
-                f"Hook IDs: {[h['id'] for h in insecure_hooks]}. "
-                "All webhooks must have SSL verification enabled for confidentiality."
+                f"Found {len(insecure_hooks)} webhook(s) without SSL: "
+                f"{[h['url'] for h in insecure_hooks]}. Enable SSL verification."
                 if not passed else
-                "All organization webhooks have SSL verification enabled."
+                "All webhooks have SSL verification enabled."
             )
         }
-        self.results.append(result)
-        return result
     
-    # =========================================================================
-    # RECOMMENDED RULES
-    # =========================================================================
-    
-    def check_members_can_create_public_repositories(self):
+    def check_collaborators_in_org(self, repo_name):
         """
-        RECOMMENDED RULE: members_can_create_public_repositories
+        REQUIRED RULE: collaborators_in_org
         
         HOW WE APPLY THIS RULE:
         -----------------------
-        1. We read "members_can_create_public_repositories" from org settings
-        2. This boolean indicates if members can create public repos
-        3. We check if it is False (disabled)
-        4. If True, members might accidentally create public repos - WARNING
+        1. Fetch outside collaborators via:
+           GET /repos/{org}/{repo}/collaborators?affiliation=outside
+        2. "Outside collaborators" are users who have access but are NOT
+           members of the organization
+        3. Collect all outside collaborator logins
+        4. Rule passes if zero outside collaborators exist
         
-        Setting Location in GitHub UI:
-            Organization Settings > Member privileges > Repository creation
+        API Endpoint: GET /repos/{org}/{repo}/collaborators?affiliation=outside
+        Expected: Empty list (no outside collaborators)
         
-        API Field: members_can_create_public_repositories
-        Expected Value: False
+        Why this matters:
+        - Outside collaborators bypass AccessHub team management
+        - Access should only be granted through properly managed teams
+        - Individual outside access is harder to track and audit
         """
-        print("    Checking: members_can_create_public_repositories (RECOMMENDED)")
-        
-        can_create_public = self.org_data.get("members_can_create_public_repositories", True)
-        can_create_internal = self.org_data.get("members_can_create_internal_repositories", True)
-        passed = not can_create_public
-        
-        result = {
-            "rule": "members_can_create_public_repositories",
-            "passed": passed,
-            "current_value": f"Public: {'Yes' if can_create_public else 'No'}, Internal: {'Yes' if can_create_internal else 'No'}",
-            "expected_value": "Public: No",
-            "enforcement": "Recommended",
-            "reason": (
-                "Members can create public repositories. This should be restricted to "
-                "private only to prevent accidental public exposure of sensitive code."
-                if not passed else
-                "Public repository creation is appropriately restricted."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_visibility_change_disabled(self):
-        """
-        RECOMMENDED RULE: visibility_change_disabled
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. We read "members_can_change_repo_visibility" from org settings
-        2. This boolean indicates if members can change repo visibility
-        3. We check if it is False (disabled)
-        4. If True, members could make private repos public - WARNING
-        
-        Setting Location in GitHub UI:
-            Organization Settings > Member privileges > 
-            "Allow members to change repository visibilities"
-        
-        API Field: members_can_change_repo_visibility
-        Expected Value: False
-        """
-        print("    Checking: visibility_change_disabled (RECOMMENDED)")
-        
-        can_change = self.org_data.get("members_can_change_repo_visibility", True)
-        passed = not can_change
-        
-        result = {
-            "rule": "visibility_change_disabled",
-            "passed": passed,
-            "current_value": "Enabled" if can_change else "Disabled",
-            "expected_value": "Disabled",
-            "enforcement": "Recommended",
-            "reason": (
-                "Members can change repository visibility. This could allow "
-                "accidental exposure of private repositories to the public."
-                if not passed else
-                "Repository visibility changes are appropriately restricted."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_delete_transfer_disabled(self):
-        """
-        RECOMMENDED RULE: delete_transfer_disabled
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. We read "members_can_delete_repositories" from org settings
-        2. This boolean indicates if members can delete/transfer repositories
-        3. We check if it is False (disabled)
-        4. If True, members could delete repos - WARNING
-        
-        Setting Location in GitHub UI:
-            Organization Settings > Member privileges > 
-            "Allow members to delete or transfer repositories"
-        
-        API Field: members_can_delete_repositories
-        Expected Value: False
-        """
-        print("    Checking: delete_transfer_disabled (RECOMMENDED)")
-        
-        can_delete = self.org_data.get("members_can_delete_repositories", True)
-        passed = not can_delete
-        
-        result = {
-            "rule": "delete_transfer_disabled",
-            "passed": passed,
-            "current_value": "Enabled" if can_delete else "Disabled",
-            "expected_value": "Disabled",
-            "enforcement": "Recommended",
-            "reason": (
-                "Members can delete or transfer repositories. This could lead to "
-                "accidental or malicious loss of code and history."
-                if not passed else
-                "Repository deletion/transfer is appropriately restricted."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_team_creation_disabled(self):
-        """
-        RECOMMENDED RULE: team_creation_disabled
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. We read "members_can_create_teams" from org settings
-        2. This boolean indicates if members can create teams
-        3. We check if it is False (disabled)
-        4. If True, members could create teams outside AccessHub - WARNING
-        
-        Setting Location in GitHub UI:
-            Organization Settings > Member privileges > 
-            "Allow members to create teams"
-        
-        API Field: members_can_create_teams
-        Expected Value: False
-        """
-        print("    Checking: team_creation_disabled (RECOMMENDED)")
-        
-        can_create = self.org_data.get("members_can_create_teams", True)
-        passed = not can_create
-        
-        result = {
-            "rule": "team_creation_disabled",
-            "passed": passed,
-            "current_value": "Enabled" if can_create else "Disabled",
-            "expected_value": "Disabled",
-            "enforcement": "Recommended",
-            "reason": (
-                "Members can create teams. This could subvert access management "
-                "through AccessHub and create unauthorized access patterns."
-                if not passed else
-                "Team creation is appropriately restricted to admins."
-            )
-        }
-        self.results.append(result)
-        return result
-    
-    def check_admin_activity_6_months(self):
-        """
-        RECOMMENDED RULE: admin_activity_6_months
-        
-        HOW WE APPLY THIS RULE:
-        -----------------------
-        1. Fetch all organization admins via GET /orgs/{org}/members?role=admin
-        2. For each admin, fetch their public events via GET /users/{login}/events
-        3. Check if any event occurred within the last 6 months
-        4. Report admins with no recent activity - WARNING
-        
-        Note: This is not a GitHub setting but a governance check.
-        Inactive admins indicate poor access revalidation practices.
-        
-        API Endpoints:
-            GET /orgs/{org}/members?role=admin - List org admins
-            GET /users/{login}/events - Get user's recent activity
-        
-        Expected: All admins should have activity within 6 months
-        """
-        print("    Checking: admin_activity_6_months (RECOMMENDED)")
-        
-        # Fetch organization admins
-        admins = self.api.paginate(f"/orgs/{self.org}/members?role=admin&per_page=100")
+        outside_collabs = self.api.paginate(
+            f"/repos/{self.org}/{repo_name}/collaborators?affiliation=outside&per_page=100"
+        )
         time.sleep(SLEEP_INTERVAL)
         
-        six_months_ago = datetime.now(timezone.utc) - timedelta(days=180)
-        inactive_admins = []
+        collab_logins = [c["login"] for c in outside_collabs]
+        passed = len(collab_logins) == 0
         
-        for admin in admins:
-            login = admin["login"]
-            
-            # Fetch user's recent events
-            events = self.api.get(f"/users/{login}/events?per_page=10", allow_404=True) or []
-            time.sleep(SLEEP_INTERVAL)
-            
-            # Check if any event is within 6 months
-            has_recent_activity = False
-            for event in events:
-                created_at = event.get("created_at", "")
-                if created_at:
-                    try:
-                        event_date = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                        if event_date > six_months_ago:
-                            has_recent_activity = True
-                            break
-                    except ValueError:
-                        pass
-            
-            if not has_recent_activity:
-                inactive_admins.append(login)
-        
-        passed = len(inactive_admins) == 0
-        
-        result = {
-            "rule": "admin_activity_6_months",
+        return {
+            "rule": "collaborators_in_org",
             "passed": passed,
-            "current_value": f"{len(inactive_admins)} inactive admins",
-            "expected_value": "0 inactive admins",
-            "enforcement": "Recommended",
-            "inactive_admins": inactive_admins,
-            "total_admins": len(admins),
+            "current_value": f"{len(collab_logins)} outside collaborators",
+            "expected_value": "0 outside collaborators",
+            "enforcement": "Required",
+            "outside_collaborators": collab_logins,
             "reason": (
-                f"Found {len(inactive_admins)} admin(s) without activity in 6 months: "
-                f"{inactive_admins}. Inactive admins should be reviewed for access removal."
+                f"Outside collaborators found: {collab_logins}. "
+                "Remove these users and grant access through AccessHub teams instead."
                 if not passed else
-                f"All {len(admins)} organization admins have recent activity."
+                "No outside collaborators. All access is through org membership."
             )
         }
-        self.results.append(result)
-        return result
+    
+    def check_collaborators_in_team(self, repo_name):
+        """
+        REQUIRED RULE: collaborators_in_team
+        
+        HOW WE APPLY THIS RULE:
+        -----------------------
+        1. Fetch direct collaborators via:
+           GET /repos/{org}/{repo}/collaborators?affiliation=direct
+        2. "Direct collaborators" are org members added individually
+           (not through team membership)
+        3. Collect all direct collaborator logins
+        4. Rule passes if zero direct collaborators exist
+        
+        API Endpoint: GET /repos/{org}/{repo}/collaborators?affiliation=direct
+        Expected: Empty list (no direct collaborators)
+        
+        Why this matters:
+        - Direct collaborators bypass team-based access management
+        - Team access is managed through AccessHub
+        - Individual access is harder to audit and manage at scale
+        """
+        direct_collabs = self.api.paginate(
+            f"/repos/{self.org}/{repo_name}/collaborators?affiliation=direct&per_page=100"
+        )
+        time.sleep(SLEEP_INTERVAL)
+        
+        collab_logins = [c["login"] for c in direct_collabs]
+        passed = len(collab_logins) == 0
+        
+        return {
+            "rule": "collaborators_in_team",
+            "passed": passed,
+            "current_value": f"{len(collab_logins)} direct collaborators",
+            "expected_value": "0 direct collaborators",
+            "enforcement": "Required",
+            "direct_collaborators": collab_logins,
+            "reason": (
+                f"Direct collaborators found: {collab_logins}. "
+                "Remove direct access and add users to AccessHub-managed teams."
+                if not passed else
+                "No direct collaborators. All access is through teams."
+            )
+        }
+    
+    def check_shared_repo_readers(self, repo_name, repo_data, metadata):
+        """
+        REQUIRED RULE: shared_repo_readers
+        
+        HOW WE APPLY THIS RULE:
+        -----------------------
+        1. Determine if repo should NOT have Cloud_Readers access:
+           a. Is repo public? (Cloud_Readers is meaningless for public repos)
+           b. Is repo IP-sensitive? (from .metadata ip_sensitive field)
+           c. Is repo security-sensitive? (from .metadata security_sensitive field)
+        2. Fetch teams with access via GET /repos/{org}/{repo}/teams
+        3. Check if "Cloud_Readers" team is in the list
+        4. Rule fails if Cloud_Readers has access AND repo is public/sensitive
+        
+        API Endpoint: GET /repos/{org}/{repo}/teams
+        Check: Team named "Cloud_Readers" (case-insensitive)
+        
+        Why this matters:
+        - Cloud_Readers provides org-wide read access
+        - Public repos don't need it (anyone can read)
+        - Sensitive repos shouldn't have broad read access
+        """
+        is_public = not repo_data.get("private", False)
+        is_ip_sensitive = False
+        is_security_sensitive = False
+        
+        if metadata:
+            is_ip_sensitive = str(metadata.get("ip_sensitive", "no")).lower() == "yes"
+            is_security_sensitive = str(metadata.get("security_sensitive", "no")).lower() == "yes"
+        
+        # Fetch teams with repository access
+        teams = self.api.paginate(f"/repos/{self.org}/{repo_name}/teams?per_page=100")
+        time.sleep(SLEEP_INTERVAL)
+        
+        # Check for Cloud_Readers team (case-insensitive)
+        has_cloud_readers = any(
+            t.get("name", "").lower() == "cloud_readers" 
+            for t in teams
+        )
+        
+        # Determine if Cloud_Readers should NOT have access
+        should_not_have = is_public or is_ip_sensitive or is_security_sensitive
+        passed = not (should_not_have and has_cloud_readers)
+        
+        reason_parts = []
+        if is_public:
+            reason_parts.append("public (Cloud_Readers is meaningless)")
+        if is_ip_sensitive:
+            reason_parts.append("IP-sensitive")
+        if is_security_sensitive:
+            reason_parts.append("security-sensitive")
+        
+        return {
+            "rule": "shared_repo_readers",
+            "passed": passed,
+            "current_value": f"Cloud_Readers: {'Yes' if has_cloud_readers else 'No'}, "
+                           f"Public: {'Yes' if is_public else 'No'}, "
+                           f"IP-sensitive: {'Yes' if is_ip_sensitive else 'No'}, "
+                           f"Security-sensitive: {'Yes' if is_security_sensitive else 'No'}",
+            "expected_value": "No Cloud_Readers for public/sensitive repos",
+            "enforcement": "Required",
+            "reason": (
+                f"Cloud_Readers has access but repo is {', '.join(reason_parts)}. "
+                "Remove Cloud_Readers team access."
+                if not passed else
+                "Cloud_Readers access is appropriate for this repository."
+            )
+        }
+    
+    def check_metadata_existing(self, repo_name, default_branch):
+        """
+        REQUIRED RULE: metadata_existing
+        
+        HOW WE APPLY THIS RULE:
+        -----------------------
+        1. Attempt to fetch .metadata file from repository root:
+           GET /repos/{org}/{repo}/contents/.metadata?ref={default_branch}
+        2. If API returns 404, file doesn't exist - FAIL
+        3. If API returns content, try to parse it (YAML or JSON)
+        4. Rule passes if file exists and can be parsed
+        
+        API Endpoint: GET /repos/{org}/{repo}/contents/.metadata?ref={default_branch}
+        Expected: File exists and contains valid YAML/JSON
+        
+        Why this matters:
+        - .metadata file identifies repository classification
+        - Required for automated compliance checking
+        - Contains production_code, sensitivity flags, etc.
+        """
+        metadata = self.fetch_metadata(repo_name, default_branch)
+        passed = metadata is not None
+        # Only add .metadata if missing, never overwrite
+        if not passed:
+            print(f"      INFO: .metadata missing for {repo_name} (would add, but never overwrite existing)")
+        return {
+            "rule": "metadata_existing",
+            "passed": passed,
+            "current_value": "Exists" if passed else "Missing",
+            "expected_value": "Exists",
+            "enforcement": "Required",
+            "metadata": metadata,
+            "reason": (
+                f"Missing .metadata file in repository root on branch '{default_branch}'. "
+                "Create .metadata with production_code, ip_sensitive, security_sensitive fields."
+                if not passed else
+                ".metadata file exists and is valid."
+            )
+        }
+    
+    def check_private_if_sensitive(self, repo_name, repo_data, metadata):
+        """
+        REQUIRED RULE: private_if_sensitive
+        
+        HOW WE APPLY THIS RULE:
+        -----------------------
+        1. Get repository visibility from repo_data.private field
+        2. Parse .metadata for sensitivity flags:
+           - production_code: yes/no
+           - ip_sensitive: yes/no  
+           - security_sensitive: yes/no
+           - public_override: true/false (exemption)
+        3. If any sensitivity flag is "yes" AND public_override is not true:
+           Repository MUST be private
+        4. Rule fails if sensitive repo is public without override
+        
+        Why this matters:
+        - Production code may contain secrets or proprietary logic
+        - IP-sensitive code is company intellectual property
+        - Security-sensitive code could reveal vulnerabilities
+        - Public exposure of sensitive code is a major security risk
+        """
+        is_private = repo_data.get("private", False)
+        
+        if not metadata:
+            return {
+                "rule": "private_if_sensitive",
+                "passed": False,
+                "current_value": f"Private: {'Yes' if is_private else 'No'}, Metadata: Missing",
+                "expected_value": "Cannot verify - metadata missing",
+                "enforcement": "Required",
+                "reason": "Cannot verify sensitivity - .metadata file is missing."
+            }
+        
+        # Parse sensitivity flags from metadata
+        has_production = str(metadata.get("production_code", "no")).lower() == "yes"
+        is_ip_sensitive = str(metadata.get("ip_sensitive", "no")).lower() == "yes"
+        is_security_sensitive = str(metadata.get("security_sensitive", "no")).lower() == "yes"
+        has_override = metadata.get("public_override", False)
+        
+        # Check if override is truthy
+        if isinstance(has_override, str):
+            has_override = has_override.lower() in ("true", "yes", "1")
+        
+        # Repo must be private if sensitive (unless override granted)
+        is_sensitive = has_production or is_ip_sensitive or is_security_sensitive
+        must_be_private = is_sensitive and not has_override
+        
+        passed = not (must_be_private and not is_private)
+        
+        sensitivity_reasons = []
+        if has_production:
+            sensitivity_reasons.append("production_code")
+        if is_ip_sensitive:
+            sensitivity_reasons.append("ip_sensitive")
+        if is_security_sensitive:
+            sensitivity_reasons.append("security_sensitive")
+        
+        return {
+            "rule": "private_if_sensitive",
+            "passed": passed,
+            "current_value": f"Private: {'Yes' if is_private else 'No'}, "
+                           f"Sensitive: {', '.join(sensitivity_reasons) or 'No'}, "
+                           f"Override: {'Yes' if has_override else 'No'}",
+            "expected_value": "Private if sensitive (unless override)",
+            "enforcement": "Required",
+            "reason": (
+                f"Repository is public but marked as {', '.join(sensitivity_reasons)}. "
+                "Must be made private or add public_override with documented justification."
+                if not passed else
+                "Repository visibility is appropriate for its sensitivity level."
+            )
+        }
+    
+    def check_archived_status(self, repo_name, repo_data, metadata):
+        """
+        REQUIRED RULE: archived_status
+        
+        HOW WE APPLY THIS RULE:
+        -----------------------
+        1. Get archived status from repo_data.archived field
+        2. Parse .metadata for production status:
+           - production_code: yes/no
+           - production_code_end: YYYY-MM-DD date (when production usage ends)
+        3. Logic:
+           - If production_code=yes AND no end date: MUST NOT be archived
+           - If production_code=yes AND end date in future: MUST NOT be archived
+           - If production_code=yes AND end date passed: Can be archived
+           - If production_code=no: Archive status doesn't matter
+        
+        Why this matters:
+        - Archived repos cannot receive updates
+        - Active production code needs to be maintainable
+        - Archiving active production code creates security risk
+        """
+        is_archived = repo_data.get("archived", False)
+        
+        if not metadata:
+            # If no metadata, can't verify - but archived without metadata is suspicious
+            return {
+                "rule": "archived_status",
+                "passed": True,  # Can't verify, don't fail
+                "current_value": f"Archived: {'Yes' if is_archived else 'No'}, Metadata: Missing",
+                "expected_value": "Cannot verify without metadata",
+                "enforcement": "Required",
+                "reason": "Cannot verify production status - .metadata file missing."
+            }
+        
+        has_production = str(metadata.get("production_code", "no")).lower() == "yes"
+        production_end = metadata.get("production_code_end")
+        
+        # Check if production end date has passed
+        end_date_passed = False
+        if production_end:
+            try:
+                end_date = datetime.strptime(str(production_end), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                today = datetime.now(timezone.utc)
+                end_date_passed = end_date < today
+            except ValueError:
+                pass
+        
+        # Repo should NOT be archived if actively used in production
+        is_active_production = has_production and not end_date_passed
+        passed = not (is_active_production and is_archived)
+        
+        return {
+            "rule": "archived_status",
+            "passed": passed,
+            "current_value": f"Archived: {'Yes' if is_archived else 'No'}, "
+                           f"Production: {'Yes' if has_production else 'No'}, "
+                           f"End Date: {production_end or 'None'}, "
+                           f"End Passed: {'Yes' if end_date_passed else 'No'}",
+            "expected_value": "Not archived if active production code",
+            "enforcement": "Required",
+            "reason": (
+                "Repository is archived but contains active production code. "
+                "Unarchive the repository or update .metadata with production_code_end date."
+                if not passed else
+                "Archive status is appropriate for production code status."
+            )
+        }
     
     # =========================================================================
-    # RUN ALL CHECKS
+    # CHECK SINGLE REPOSITORY
     # =========================================================================
+    
+    def check_repository(self, repo_data):
+        """
+        Run all compliance checks on a single repository.
+        Skips archived repos and repos with default branch 'main'.
+        
+        Returns dict with all rule results for this repository, or None if skipped.
+        """
+        repo_name = repo_data["name"]
+        default_branch = repo_data.get("default_branch", "master")
+        
+        print(f"    Checking: {repo_name}")
+
+        # Skip archived repos
+        if repo_data.get("archived", False):
+            print(f"      SKIP: archived repo: {repo_name}")
+            return None
+
+        # Skip repos with default branch 'main'
+        if default_branch == "main":
+            print(f"      SKIP: default branch is 'main': {repo_name}")
+            return None
+        
+        # Fetch metadata first (used by multiple rules)
+        metadata = self.fetch_metadata(repo_name, default_branch)
+        
+        # Run all checks
+        results = {
+            "repository": repo_name,
+            "default_branch": default_branch,
+            "private": repo_data.get("private", False),
+            "archived": repo_data.get("archived", False),
+            "rules": []
+        }
+        
+        # Required Rules
+        results["rules"].append(self.check_unsecure_hooks(repo_name))
+        results["rules"].append(self.check_collaborators_in_org(repo_name))
+        results["rules"].append(self.check_collaborators_in_team(repo_name))
+        results["rules"].append(self.check_shared_repo_readers(repo_name, repo_data, metadata))
+        results["rules"].append(self.check_metadata_existing(repo_name, default_branch))
+        results["rules"].append(self.check_private_if_sensitive(repo_name, repo_data, metadata))
+        results["rules"].append(self.check_archived_status(repo_name, repo_data, metadata))
+        
+        return results
     
     def run_all_checks(self):
         """
-        Execute all organization-level compliance checks.
+        Execute all repository compliance checks.
         
         Returns:
-            list: All check results
+            list: All repository check results
         """
         print("\n" + "=" * 60)
-        print("ORGANIZATION-LEVEL COMPLIANCE CHECKS")
+        print("REPOSITORY-LEVEL COMPLIANCE CHECKS")
         print("=" * 60)
         
-        # Fetch organization settings first
-        self.fetch_org_settings()
+        repos = self.get_repositories()
         
-        print("\n  Running Required Rules...")
-        self.check_default_repository_permission()
-        self.check_org_outside_collaborators()
-        self.check_unsecure_org_hooks()
+        print(f"\n  Checking {len(repos)} repositories...")
+        skipped_count = 0
+        for repo in repos:
+            result = self.check_repository(repo)
+            if result:
+                self.results.append(result)
+            else:
+                skipped_count += 1
         
-        print("\n  Running Recommended Rules...")
-        self.check_members_can_create_public_repositories()
-        self.check_visibility_change_disabled()
-        self.check_delete_transfer_disabled()
-        self.check_team_creation_disabled()
-        self.check_admin_activity_6_months()
-        
+        print(f"\n  Checked {len(self.results)} repositories, skipped {skipped_count} (archived or default branch 'main')")
         return self.results
 
 
@@ -841,21 +907,33 @@ class ReportGenerator:
         self.results = results
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    def generate_json_report(self, filepath="org_compliance_report.json"):
+    def _calculate_summary(self):
+        """Calculate summary statistics."""
+        total_repos = len(self.results)
+        total_rules = sum(len(r["rules"]) for r in self.results)
+        total_passed = sum(1 for r in self.results for rule in r["rules"] if rule["passed"])
+        total_failed = total_rules - total_passed
+        repos_with_issues = sum(1 for r in self.results if any(not rule["passed"] for rule in r["rules"]))
+        
+        return {
+            "total_repositories": total_repos,
+            "total_rules_checked": total_rules,
+            "total_passed": total_passed,
+            "total_failed": total_failed,
+            "repos_with_issues": repos_with_issues,
+            "repos_compliant": total_repos - repos_with_issues
+        }
+    
+    def generate_json_report(self, filepath="repo_compliance_report.json"):
         """Generate JSON report."""
+        summary = self._calculate_summary()
+        
         report = {
-            "report_type": "Organization Compliance",
+            "report_type": "Repository Compliance",
             "organization": self.org,
             "generated_at": self.timestamp,
-            "summary": {
-                "total_rules": len(self.results),
-                "passed": sum(1 for r in self.results if r["passed"]),
-                "failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO"),
-                "info": sum(1 for r in self.results if r.get("status") == "INFO"),
-                "required_failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required"),
-                "recommended_failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Recommended")
-            },
-            "results": self.results
+            "summary": summary,
+            "repositories": self.results
         }
         
         with open(filepath, "w", encoding="utf-8") as f:
@@ -864,75 +942,52 @@ class ReportGenerator:
         print(f"  JSON report saved: {filepath}")
         return filepath
     
-    def generate_markdown_report(self, filepath="org_compliance_report.md"):
+    def generate_markdown_report(self, filepath="repo_compliance_report.md"):
         """Generate Markdown report."""
-        passed = sum(1 for r in self.results if r["passed"])
-        failed = sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO")
-        info_count = sum(1 for r in self.results if r.get("status") == "INFO")
-        required_failed = sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required")
+        summary = self._calculate_summary()
         
         lines = [
-            "# Organization Compliance Report",
+            "# Repository Compliance Report",
             "",
             f"**Organization:** {self.org}",
             f"**Generated:** {self.timestamp}",
             "",
             "## Summary",
             "",
-            f"- **Total Rules Checked:** {len(self.results)}",
-            f"- **Passed:** {passed}",
-            f"- **Failed:** {failed}",
-            f"- **Info (Manual Action):** {info_count}",
-            f"- **Required Rules Failed:** {required_failed}",
+            f"- **Total Repositories:** {summary['total_repositories']}",
+            f"- **Repositories with Issues:** {summary['repos_with_issues']}",
+            f"- **Compliant Repositories:** {summary['repos_compliant']}",
+            f"- **Total Rules Checked:** {summary['total_rules_checked']}",
+            f"- **Passed:** {summary['total_passed']}",
+            f"- **Failed:** {summary['total_failed']}",
             "",
+            "## Repository Details",
+            ""
         ]
         
-        # Required rules
-        lines.extend(["## Required Rules", ""])
-        lines.append("| Rule | Status | Current Value | Expected Value |")
-        lines.append("|------|--------|---------------|----------------|")
-        for r in self.results:
-            if r["enforcement"] == "Required":
-                if r["passed"]:
-                    status = "✅ PASS"
-                elif r.get("status") == "INFO":
-                    status = "ℹ️ INFO"
-                else:
-                    status = "❌ FAIL"
-                lines.append(f"| {r['rule']} | {status} | {r['current_value']} | {r['expected_value']} |")
-        lines.append("")
-        
-        # Recommended rules
-        lines.extend(["## Recommended Rules", ""])
-        lines.append("| Rule | Status | Current Value | Expected Value |")
-        lines.append("|------|--------|---------------|----------------|")
-        for r in self.results:
-            if r["enforcement"] == "Recommended":
-                if r["passed"]:
-                    status = "✅ PASS"
-                elif r.get("status") == "INFO":
-                    status = "ℹ️ INFO"
-                else:
-                    status = "⚠️ WARN"
-                lines.append(f"| {r['rule']} | {status} | {r['current_value']} | {r['expected_value']} |")
-        lines.append("")
-        
-        # Details for failed rules
-        failed_results = [r for r in self.results if not r["passed"] and r.get("status") != "INFO"]
-        if failed_results:
-            lines.extend(["## Failed Rule Details", ""])
-            for r in failed_results:
-                lines.append(f"### {r['rule']} ({r['enforcement']})")
-                lines.append(f"**Reason:** {r['reason']}")
+        for repo_result in self.results:
+            repo_name = repo_result["repository"]
+            rules = repo_result["rules"]
+            passed = sum(1 for r in rules if r["passed"])
+            failed = len(rules) - passed
+            
+            status = "✅" if failed == 0 else "❌"
+            lines.append(f"### {status} {repo_name}")
+            lines.append("")
+            lines.append(f"- Branch: `{repo_result['default_branch']}`")
+            lines.append(f"- Private: {'Yes' if repo_result['private'] else 'No'}")
+            lines.append(f"- Archived: {'Yes' if repo_result['archived'] else 'No'}")
+            lines.append(f"- Rules: {passed}/{len(rules)} passed")
+            lines.append("")
+            
+            if failed > 0:
+                lines.append("**Failed Rules:**")
                 lines.append("")
-        
-        # Details for INFO rules (manual action needed)
-        info_results = [r for r in self.results if r.get("status") == "INFO"]
-        if info_results:
-            lines.extend(["## Manual Action Required", ""])
-            for r in info_results:
-                lines.append(f"### {r['rule']} ({r['enforcement']})")
-                lines.append(f"**Reason:** {r['reason']}")
+                lines.append("| Rule | Current | Expected |")
+                lines.append("|------|---------|----------|")
+                for rule in rules:
+                    if not rule["passed"]:
+                        lines.append(f"| {rule['rule']} | {rule['current_value']} | {rule['expected_value']} |")
                 lines.append("")
         
         with open(filepath, "w", encoding="utf-8") as f:
@@ -941,7 +996,7 @@ class ReportGenerator:
         print(f"  Markdown report saved: {filepath}")
         return filepath
     
-    def generate_excel_report(self, filepath="org_compliance_report.xlsx"):
+    def generate_excel_report(self, filepath="repo_compliance_report.xlsx"):
         """Generate Excel report."""
         wb = openpyxl.Workbook()
         
@@ -950,7 +1005,6 @@ class ReportGenerator:
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
         fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        warn_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
         thin_border = Border(
             left=Side(style='thin'), right=Side(style='thin'),
             top=Side(style='thin'), bottom=Side(style='thin')
@@ -959,22 +1013,20 @@ class ReportGenerator:
         # Summary Sheet
         ws = wb.active
         ws.title = "Summary"
-        
-        passed = sum(1 for r in self.results if r["passed"])
-        failed = sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO")
-        info_count = sum(1 for r in self.results if r.get("status") == "INFO")
+        summary = self._calculate_summary()
         
         summary_data = [
-            ["Organization Compliance Report", ""],
+            ["Repository Compliance Report", ""],
             ["", ""],
             ["Organization", self.org],
             ["Generated", self.timestamp],
             ["", ""],
-            ["Total Rules", len(self.results)],
-            ["Passed", passed],
-            ["Failed", failed],
-            ["Info (Manual Action)", info_count],
-            ["Compliance %", f"{(passed/len(self.results)*100):.1f}%" if self.results else "N/A"]
+            ["Total Repositories", summary["total_repositories"]],
+            ["Repos with Issues", summary["repos_with_issues"]],
+            ["Compliant Repos", summary["repos_compliant"]],
+            ["Total Rules Checked", summary["total_rules_checked"]],
+            ["Passed", summary["total_passed"]],
+            ["Failed", summary["total_failed"]]
         ]
         
         for row_idx, row in enumerate(summary_data, 1):
@@ -988,7 +1040,7 @@ class ReportGenerator:
         
         # Results Sheet
         ws2 = wb.create_sheet("Rule Results")
-        headers = ["Rule", "Status", "Enforcement", "Current Value", "Expected Value", "Reason"]
+        headers = ["Repository", "Rule", "Status", "Enforcement", "Current Value", "Expected Value", "Reason"]
         
         for col, header in enumerate(headers, 1):
             cell = ws2.cell(row=1, column=col, value=header)
@@ -996,45 +1048,34 @@ class ReportGenerator:
             cell.fill = header_fill
             cell.border = thin_border
         
-        info_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+        row_idx = 2
+        for repo_result in self.results:
+            repo_name = repo_result["repository"]
+            for rule in repo_result["rules"]:
+                values = [
+                    repo_name,
+                    rule["rule"],
+                    "PASS" if rule["passed"] else "FAIL",
+                    rule["enforcement"],
+                    rule["current_value"],
+                    rule["expected_value"],
+                    rule["reason"]
+                ]
+                for col_idx, value in enumerate(values, 1):
+                    cell = ws2.cell(row=row_idx, column=col_idx, value=value)
+                    cell.border = thin_border
+                    if col_idx == 3:  # Status column
+                        cell.fill = pass_fill if rule["passed"] else fail_fill
+                row_idx += 1
         
-        for row_idx, r in enumerate(self.results, 2):
-            # Determine display status
-            if r["passed"]:
-                display_status = "PASS"
-            elif r.get("status") == "INFO":
-                display_status = "INFO"
-            else:
-                display_status = "FAIL"
-            
-            values = [
-                r["rule"],
-                display_status,
-                r["enforcement"],
-                r["current_value"],
-                r["expected_value"],
-                r["reason"]
-            ]
-            for col_idx, value in enumerate(values, 1):
-                cell = ws2.cell(row=row_idx, column=col_idx, value=value)
-                cell.border = thin_border
-                if col_idx == 2:  # Status column
-                    if r["passed"]:
-                        cell.fill = pass_fill
-                    elif r.get("status") == "INFO":
-                        cell.fill = info_fill
-                    elif r["enforcement"] == "Required":
-                        cell.fill = fail_fill
-                    else:
-                        cell.fill = warn_fill
-        
-        # Adjust column widths
-        ws2.column_dimensions['A'].width = 35
-        ws2.column_dimensions['B'].width = 10
-        ws2.column_dimensions['C'].width = 15
-        ws2.column_dimensions['D'].width = 40
-        ws2.column_dimensions['E'].width = 25
-        ws2.column_dimensions['F'].width = 60
+        # Adjust widths
+        ws2.column_dimensions['A'].width = 30
+        ws2.column_dimensions['B'].width = 25
+        ws2.column_dimensions['C'].width = 10
+        ws2.column_dimensions['D'].width = 12
+        ws2.column_dimensions['E'].width = 45
+        ws2.column_dimensions['F'].width = 30
+        ws2.column_dimensions['G'].width = 60
         
         wb.save(filepath)
         print(f"  Excel report saved: {filepath}")
@@ -1049,40 +1090,38 @@ class ReportGenerator:
 
 
 # =============================================================================
-# ORGANIZATION COMPLIANCE APPLIER
+# REPOSITORY COMPLIANCE APPLIER
 # =============================================================================
 
-class OrgComplianceApplier:
+class RepoComplianceApplier:
     """
-    Applies compliant organization settings.
+    Applies compliant repository settings.
     Supports backup before changes and rollback if needed.
     
-    APPLY MODE:
-    -----------
-    1. Fetch current organization settings
-    2. Save backup to org_backup_TIMESTAMP.json
-    3. Apply compliant settings for failed rules
-    4. Generate report of changes made
-    
-    ROLLBACK MODE:
-    --------------
-    1. Read backup file
-    2. Restore original organization settings
-    3. Report what was restored
-    
-    WHAT CAN BE APPLIED:
-    --------------------
-    - default_repository_permission: PATCH /orgs/{org} with {"default_repository_permission": "none"}
-    - members_can_invite_outside_collaborators: PATCH /orgs/{org} with {"members_can_invite_outside_collaborators": false}
-    - members_can_create_public_repositories: PATCH /orgs/{org}
-    - members_can_change_repo_visibility: PATCH /orgs/{org}
-    - members_can_delete_repositories: PATCH /orgs/{org}
-    - members_can_create_teams: PATCH /orgs/{org}
+    WHAT CAN BE APPLIED AUTOMATICALLY:
+    ----------------------------------
+    1. unsecure_hooks: Enable SSL verification on webhooks
+       API: PATCH /repos/{org}/{repo}/hooks/{hook_id} with {"config": {"insecure_ssl": "0"}}
+       
+    2. collaborators_in_org: Remove outside collaborators
+       API: DELETE /repos/{org}/{repo}/collaborators/{username}
+       
+    3. collaborators_in_team: Remove direct collaborators (move to teams)
+       API: DELETE /repos/{org}/{repo}/collaborators/{username}
+       Note: User should be added to appropriate teams via AccessHub
+       
+    4. shared_repo_readers: Remove Cloud_Readers team access
+       API: DELETE /orgs/{org}/teams/{team_slug}/repos/{org}/{repo}
+       
+    5. private_if_sensitive: Make repository private
+       API: PATCH /repos/{org}/{repo} with {"private": true}
+       
+    6. archived_status: Unarchive repository
+       API: PATCH /repos/{org}/{repo} with {"archived": false}
     
     WHAT CANNOT BE APPLIED AUTOMATICALLY:
     -------------------------------------
-    - unsecure_org_hooks: Requires manual webhook reconfiguration or deleting insecure hooks
-    - admin_activity_6_months: Governance issue, requires manual admin review
+    - metadata_existing: Requires creating .metadata file (content unknown)
     """
     
     def __init__(self, api_client, org_name, dry_run=False):
@@ -1093,165 +1132,477 @@ class OrgComplianceApplier:
         self.errors = []
         self.skipped = []
     
-    def get_compliant_settings(self):
+    def backup_current_settings(self, check_results):
         """
-        Get the compliant settings payload for organization.
-        
-        API: PATCH /orgs/{org}
-        
-        Returns:
-            dict: Compliant settings payload
-        """
-        return {
-            "default_repository_permission": "none",                    # Required rule
-            "members_can_invite_outside_collaborators": False,         # Required rule (via API: members_allowed_repository_creation_type)
-            "members_can_create_public_repositories": False,           # Recommended rule
-            "members_can_change_repo_visibility": False,               # Recommended rule
-            "members_can_delete_repositories": False,                  # Recommended rule
-            "members_can_create_teams": False                          # Recommended rule
-        }
-    
-    def backup_current_settings(self, current_org_data, check_results):
-        """
-        Save current organization settings to backup file.
+        Save current repository settings to backup file.
         
         Args:
-            current_org_data: Current organization settings from API
             check_results: Results from compliance check
         
         Returns:
             str: Path to backup file
         """
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_file = f"org_backup_{timestamp}.json"
+        backup_file = f"repo_backup_{timestamp}.json"
         
-        # Extract relevant settings
         backup_data = {
             "timestamp": datetime.now().isoformat(),
             "organization": self.org,
-            "settings": {
-                "default_repository_permission": current_org_data.get("default_repository_permission"),
-                "members_can_invite_outside_collaborators": current_org_data.get("members_can_invite_outside_collaborators"),
-                "members_can_create_public_repositories": current_org_data.get("members_can_create_public_repositories"),
-                "members_can_change_repo_visibility": current_org_data.get("members_can_change_repo_visibility"),
-                "members_can_delete_repositories": current_org_data.get("members_can_delete_repositories"),
-                "members_can_create_teams": current_org_data.get("members_can_create_teams"),
-                "members_can_create_internal_repositories": current_org_data.get("members_can_create_internal_repositories"),
-                "members_can_create_private_repositories": current_org_data.get("members_can_create_private_repositories")
-            },
-            "check_results": check_results
+            "repositories": []
         }
+        
+        print("\n  Creating backup of current settings...")
+        
+        for repo_result in check_results:
+            repo_name = repo_result["repository"]
+            
+            # Fetch current repo settings
+            repo_data = self.api.get(f"/repos/{self.org}/{repo_name}", allow_404=True)
+            time.sleep(SLEEP_INTERVAL)
+            
+            # Fetch hooks
+            hooks = self.api.get(f"/repos/{self.org}/{repo_name}/hooks", allow_404=True) or []
+            time.sleep(SLEEP_INTERVAL)
+            
+            # Fetch collaborators
+            outside_collabs = self.api.paginate(
+                f"/repos/{self.org}/{repo_name}/collaborators?affiliation=outside&per_page=100"
+            )
+            direct_collabs = self.api.paginate(
+                f"/repos/{self.org}/{repo_name}/collaborators?affiliation=direct&per_page=100"
+            )
+            
+            # Fetch teams
+            teams = self.api.paginate(f"/repos/{self.org}/{repo_name}/teams?per_page=100")
+            
+            backup_data["repositories"].append({
+                "repository": repo_name,
+                "private": repo_data.get("private") if repo_data else None,
+                "archived": repo_data.get("archived") if repo_data else None,
+                "hooks": hooks,
+                "outside_collaborators": [c["login"] for c in outside_collabs],
+                "direct_collaborators": [c["login"] for c in direct_collabs],
+                "teams": [{"name": t["name"], "slug": t["slug"], "permission": t.get("permission")} for t in teams],
+                "rules_checked": repo_result["rules"]
+            })
         
         with open(backup_file, "w", encoding="utf-8") as f:
             json.dump(backup_data, f, indent=2, default=str)
         
-        print(f"  Backup saved: {backup_file}")
+        print(f"    Backup saved: {backup_file}")
+        print(f"    Backed up {len(backup_data['repositories'])} repository configurations")
+        
         return backup_file
     
-    def apply_rule(self, rule_name, current_value, compliant_value):
+    def fix_unsecure_hooks(self, repo_name, insecure_hooks):
         """
-        Apply a single compliant setting.
+        Enable SSL verification on insecure webhooks.
         
         Args:
-            rule_name: Name of the rule/setting
-            current_value: Current value
-            compliant_value: Value to set for compliance
+            repo_name: Repository name
+            insecure_hooks: List of hook info dicts with id
         
         Returns:
-            dict: Result with success status
+            list: Results for each hook
         """
-        # Map rule names to API field names
-        field_mapping = {
-            "default_repository_permission": "default_repository_permission",
-            "org_outside_collaborators": "members_can_invite_outside_collaborators",
-            "members_can_create_public_repositories": "members_can_create_public_repositories",
-            "visibility_change_disabled": "members_can_change_repo_visibility",
-            "delete_transfer_disabled": "members_can_delete_repositories",
-            "team_creation_disabled": "members_can_create_teams"
-        }
+        results = []
         
-        api_field = field_mapping.get(rule_name)
-        if not api_field:
-            return {
-                "success": False,
-                "rule": rule_name,
-                "error": f"Cannot apply automatically: {rule_name} requires manual intervention"
-            }
+        for hook in insecure_hooks:
+            hook_id = hook.get("id")
+            if not hook_id:
+                continue
+            
+            if self.dry_run:
+                results.append({
+                    "success": True,
+                    "dry_run": True,
+                    "hook_id": hook_id,
+                    "action": f"Would enable SSL verification on hook {hook_id}"
+                })
+                continue
+            
+            try:
+                # Enable SSL verification
+                self.api.patch(
+                    f"/repos/{self.org}/{repo_name}/hooks/{hook_id}",
+                    {"config": {"insecure_ssl": "0"}}
+                )
+                time.sleep(SLEEP_INTERVAL)
+                results.append({
+                    "success": True,
+                    "hook_id": hook_id,
+                    "action": f"Enabled SSL verification on hook {hook_id}"
+                })
+            except requests.exceptions.HTTPError as e:
+                results.append({
+                    "success": False,
+                    "hook_id": hook_id,
+                    "error": str(e)
+                })
         
+        return results
+    
+    def remove_collaborator(self, repo_name, username, collab_type):
+        """
+        Remove a collaborator from repository.
+        
+        Args:
+            repo_name: Repository name
+            username: Collaborator username
+            collab_type: "outside" or "direct"
+        
+        Returns:
+            dict: Result
+        """
         if self.dry_run:
             return {
                 "success": True,
                 "dry_run": True,
-                "rule": rule_name,
-                "field": api_field,
-                "old_value": current_value,
-                "new_value": compliant_value,
-                "action": f"Would set {api_field} to {compliant_value}"
+                "username": username,
+                "type": collab_type,
+                "action": f"Would remove {collab_type} collaborator: {username}"
             }
         
         try:
-            payload = {api_field: compliant_value}
-            self.api.patch(f"/orgs/{self.org}", payload)
+            self.api.delete(f"/repos/{self.org}/{repo_name}/collaborators/{username}")
             time.sleep(SLEEP_INTERVAL)
-            
             return {
                 "success": True,
-                "rule": rule_name,
-                "field": api_field,
-                "old_value": current_value,
-                "new_value": compliant_value,
-                "action": f"Set {api_field} to {compliant_value}"
+                "username": username,
+                "type": collab_type,
+                "action": f"Removed {collab_type} collaborator: {username}"
             }
         except requests.exceptions.HTTPError as e:
             return {
                 "success": False,
-                "rule": rule_name,
-                "field": api_field,
+                "username": username,
+                "type": collab_type,
                 "error": str(e)
             }
     
-    def apply_all(self, check_results, current_org_data):
+    def remove_team_access(self, repo_name, team_slug):
         """
-        Apply compliant settings for all failed rules.
+        Remove team access from repository.
         
         Args:
-            check_results: Results from OrgComplianceChecker
-            current_org_data: Current organization settings
+            repo_name: Repository name
+            team_slug: Team slug
+        
+        Returns:
+            dict: Result
+        """
+        if self.dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "team": team_slug,
+                "action": f"Would remove team access: {team_slug}"
+            }
+        
+        try:
+            self.api.delete(f"/orgs/{self.org}/teams/{team_slug}/repos/{self.org}/{repo_name}")
+            time.sleep(SLEEP_INTERVAL)
+            return {
+                "success": True,
+                "team": team_slug,
+                "action": f"Removed team access: {team_slug}"
+            }
+        except requests.exceptions.HTTPError as e:
+            return {
+                "success": False,
+                "team": team_slug,
+                "error": str(e)
+            }
+    
+    def make_private(self, repo_name):
+        """
+        Make repository private.
+        
+        Args:
+            repo_name: Repository name
+        
+        Returns:
+            dict: Result
+        """
+        if self.dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "Would make repository private"
+            }
+        
+        try:
+            self.api.patch(f"/repos/{self.org}/{repo_name}", {"private": True})
+            time.sleep(SLEEP_INTERVAL)
+            return {
+                "success": True,
+                "action": "Made repository private"
+            }
+        except requests.exceptions.HTTPError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def unarchive(self, repo_name):
+        """
+        Unarchive repository.
+        
+        Args:
+            repo_name: Repository name
+        
+        Returns:
+            dict: Result
+        """
+        if self.dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "Would unarchive repository"
+            }
+        
+        try:
+            self.api.patch(f"/repos/{self.org}/{repo_name}", {"archived": False})
+            time.sleep(SLEEP_INTERVAL)
+            return {
+                "success": True,
+                "action": "Unarchived repository"
+            }
+        except requests.exceptions.HTTPError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def apply_repo_fixes(self, repo_result):
+        """
+        Apply fixes for a single repository.
+        
+        Args:
+            repo_result: Repository check results
+        
+        Returns:
+            dict: Changes made, errors, and skipped items
+        """
+        repo_name = repo_result["repository"]
+        failed_rules = [r for r in repo_result["rules"] if not r["passed"]]
+        
+        repo_changes = {
+            "repository": repo_name,
+            "changes": [],
+            "errors": [],
+            "skipped": []
+        }
+        
+        # Automated .metadata creation for Tornado repos (Non-Prod Gen1)
+        tornado_missing_metadata = [
+            "onecloud-tracker", "vcloud", "defect-analysis-tool", "Office-of-the-CTO",
+            "vuln_scan_output", "JIL_MCV_Architecture", "personal_ms",
+            "vcd-jil-test-automation", "foo-repo", "bar-repo", "vcd-test",
+            "skytap-tracker", "vuln_scan_output_nonprod", "MVCS-Documentation",
+            "NextGenVPC", "LOGAN-Documentation", "mvcs-prototype", "mvcs-tracker",
+            "mvcs-mgmt-comm", "mvcs-mgmt-scheduler", "mvcs-mgmt-worker",
+            "mvcs-mgmt-api", "mvcs-ansible", "mvcs-cli", "Isolation",
+            "artemis-teams", "hpo-hipaa-assessment-2020", "vcd-access",
+            "mvcs-change-management", "vcd-infra-comm", "vcd-infra-api",
+            "vcd-infra-worker", "vcd-infra-scheduler", "codescan", "ursula_env",
+            "non-personal-ids", "git-issue-analysis", "vpc-sp",
+            "newrelic-monitor-synthetic", "vpc-veeam",
+            "atlas-github-app-test-repo", "vcd-billing-resubmission-script",
+            "v2t", "vcd-billing-reporting-script", "vcd-billing-cos-reader",
+            "pvs-bur-sp", "vcd-reports-prototype", "console-e2e",
+            "UIAutomationResult", "add-on-services-team",
+            "vcd-language-translation",
+            "PIM_to_Secrete_Manager_ESXI_Automation", "vcd-iaas-vro",
+            "ipops-vcd-dev-request", "auditree_config", "vcd-SF-rev-20221114",
+            "ic4v-evidence-locker", "ic4v-auditree-config", "vmware-sol-locker",
+            "auditree-VCS-evidence-locker", "auditree-VCS",
+            "gen1-evidence-locker-test1", "gen1-auditree-config", "ic4v-patent",
+            "vcf-on-vpc-documentation", "vcd-pscli-veeam",
+            "VCD-Price-change-July2023", "auditree-vuln-scan-output",
+            "svelte-pocs", "advisory", "bss_cloudant_account_compare",
+            "veeam-customer-schedule", "sf-shared-deprecation",
+            "security-scans-config", "security-scans-compliance-issues",
+            "security-scans-compliance-inventory",
+            "security-scans-compliance-evidence", "postgressqlreportresults",
+            "ic4v-data-analytics", "ic4v-data-analytics-common", "ic4v-vrops",
+            "ic4v-platform-team-synlab", "license-expiry-reminder",
+            "logger-agent-config", "onepipeline-compliance-incident-issues",
+            "onepipeline-compliance-evidence-locker",
+            "onepipeline-compliance-inventory", "kmip4hpcs_monitor"
+        ]
+        
+        for rule in failed_rules:
+            rule_name = rule["rule"]
+            
+            if rule_name == "unsecure_hooks":
+                insecure_hooks = rule.get("insecure_hooks", [])
+                if insecure_hooks:
+                    results = self.fix_unsecure_hooks(repo_name, insecure_hooks)
+                    for result in results:
+                        result["rule"] = rule_name
+                        if result.get("success"):
+                            repo_changes["changes"].append(result)
+                        else:
+                            repo_changes["errors"].append(result)
+            
+            elif rule_name == "collaborators_in_org":
+                outside_collabs = rule.get("outside_collaborators", [])
+                for username in outside_collabs:
+                    result = self.remove_collaborator(repo_name, username, "outside")
+                    result["rule"] = rule_name
+                    if result.get("success"):
+                        repo_changes["changes"].append(result)
+                    else:
+                        repo_changes["errors"].append(result)
+            
+            elif rule_name == "collaborators_in_team":
+                direct_collabs = rule.get("direct_collaborators", [])
+                for username in direct_collabs:
+                    result = self.remove_collaborator(repo_name, username, "direct")
+                    result["rule"] = rule_name
+                    if result.get("success"):
+                        repo_changes["changes"].append(result)
+                    else:
+                        repo_changes["errors"].append(result)
+            
+            elif rule_name == "shared_repo_readers":
+                result = self.remove_team_access(repo_name, "cloud_readers")
+                result["rule"] = rule_name
+                if result.get("success"):
+                    repo_changes["changes"].append(result)
+                else:
+                    repo_changes["errors"].append(result)
+            
+            elif rule_name == "private_if_sensitive":
+                result = self.make_private(repo_name)
+                result["rule"] = rule_name
+                if result.get("success"):
+                    repo_changes["changes"].append(result)
+                else:
+                    repo_changes["errors"].append(result)
+            
+            elif rule_name == "archived_status":
+                current_val = rule.get("current_value", "")
+                if "Archived: Yes" in current_val:
+                    result = self.unarchive(repo_name)
+                    result["rule"] = rule_name
+                    if result.get("success"):
+                        repo_changes["changes"].append(result)
+                    else:
+                        repo_changes["errors"].append(result)
+            
+            elif rule_name == "metadata_existing":
+                # Only add .metadata if missing, never overwrite
+                if repo_name not in tornado_missing_metadata:
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Repo not in Tornado missing .metadata list, skipping creation"
+                    })
+                    continue
+                if repo_name.startswith("vcd-") or repo_name.startswith("mvcs-"):
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Repo starts with vcd- or mvcs-, skipping creation"
+                    })
+                    continue
+                if repo_result.get("default_branch", "master") == "main":
+                    repo_changes["skipped"].append({
+                        "rule": rule_name,
+                        "reason": "Default branch is main, skipping creation"
+                    })
+                    continue
+                # Create Non-Prod Gen1 .metadata content
+                metadata_content = {
+                    "service": "vmware-solutions",
+                    "production_code": "No",
+                    "production_branches": [""],
+                    "security_sensitive": "no",
+                    "ip_sensitive": "no",
+                    "allow_cloud_readers": "yes"
+                }
+                url = f"/repos/{self.org}/{repo_name}/contents/.metadata"
+                data = {
+                    "message": "Add .metadata file for compliance",
+                    "content": base64.b64encode(json.dumps(metadata_content, indent=2).encode("utf-8")).decode("utf-8"),
+                    "branch": repo_result.get("default_branch", "master")
+                }
+                if not self.dry_run:
+                    try:
+                        resp = self.api.put(url, data)
+                        if resp and resp.get("content"):
+                            repo_changes["changes"].append({
+                                "rule": rule_name,
+                                "action": "Created .metadata file",
+                                "location": "root",
+                                "success": True
+                            })
+                        else:
+                            repo_changes["errors"].append({
+                                "rule": rule_name,
+                                "error": "Failed to create .metadata file"
+                            })
+                    except requests.exceptions.HTTPError as e:
+                        if e.response is not None and e.response.status_code == 409:
+                            repo_changes["skipped"].append({
+                                "rule": rule_name,
+                                "reason": ".metadata already exists (409 Conflict), skipping"
+                            })
+                        else:
+                            repo_changes["errors"].append({
+                                "rule": rule_name,
+                                "error": f"HTTP error creating .metadata: {e}"
+                            })
+                else:
+                    repo_changes["changes"].append({
+                        "rule": rule_name,
+                        "action": "(Dry run) Would create .metadata file",
+                        "location": "root",
+                        "success": True
+                    })
+            
+            else:
+                repo_changes["skipped"].append({
+                    "rule": rule_name,
+                    "reason": f"Unknown rule: {rule_name}"
+                })
+        
+        return repo_changes
+    
+    def apply_all(self, check_results, target_repo=None):
+        """
+        Apply compliant settings to all non-compliant repositories.
+        
+        Args:
+            check_results: Results from RepoComplianceChecker
+            target_repo: Optional - only apply to this repository
         
         Returns:
             dict: Summary of changes made
         """
         print("\n" + "=" * 60)
-        print("APPLYING ORGANIZATION COMPLIANCE RULES")
+        print("APPLYING REPOSITORY COMPLIANCE RULES")
         print("=" * 60)
         
         if self.dry_run:
             print("\n  *** DRY RUN MODE - No changes will be made ***\n")
         
+        # Filter to target repo if specified
+        if target_repo:
+            check_results = [r for r in check_results if r["repository"] == target_repo]
+            if not check_results:
+                print(f"\n  Repository '{target_repo}' not found in results.")
+                return {"changes_made": 0, "errors": 0, "skipped": 0}
+        
         # Step 1: Create backup
-        print("\n  Creating backup of current settings...")
-        backup_file = self.backup_current_settings(current_org_data, check_results)
+        backup_file = self.backup_current_settings(check_results)
         
-        # Step 2: Identify failed rules that can be applied
-        print("\n  Identifying failed rules...")
+        # Step 2: Find repositories with non-compliant rules
+        print("\n  Identifying non-compliant repositories...")
+        non_compliant = [r for r in check_results if any(not rule["passed"] for rule in r["rules"])]
         
-        # Rules that can be applied automatically
-        auto_apply_rules = {
-            "default_repository_permission": ("none", lambda x: x != "none"),
-            "org_outside_collaborators": (False, lambda x: x == "Enabled"),
-            "members_can_create_public_repositories": (False, lambda x: "Public: Yes" in str(x)),
-            "visibility_change_disabled": (False, lambda x: x == "Enabled"),
-            "delete_transfer_disabled": (False, lambda x: x == "Enabled"),
-            "team_creation_disabled": (False, lambda x: x == "Enabled")
-        }
-        
-        # Rules that cannot be applied automatically
-        manual_rules = ["unsecure_org_hooks", "admin_activity_6_months"]
-        
-        failed_rules = [r for r in check_results if not r["passed"]]
-        
-        if not failed_rules:
-            print("    All rules are compliant! No changes needed.")
+        if not non_compliant:
+            print("    All repositories are compliant! No changes needed.")
             return {
                 "backup_file": backup_file,
                 "changes_made": 0,
@@ -1259,65 +1610,53 @@ class OrgComplianceApplier:
                 "skipped": 0
             }
         
-        print(f"    Found {len(failed_rules)} failed rules")
+        print(f"    Found {len(non_compliant)} non-compliant repositories")
         
-        # Step 3: Apply compliant settings
-        print("\n  Applying compliant settings...")
+        # Step 3: Apply fixes
+        print("\n  Applying fixes...")
         
-        for result in failed_rules:
-            rule_name = result["rule"]
-            current_value = result["current_value"]
+        all_repo_changes = []
+        
+        for repo_result in non_compliant:
+            repo_name = repo_result["repository"]
+            print(f"\n    {repo_name}:")
             
-            print(f"    {rule_name}: ", end="")
+            repo_changes = self.apply_repo_fixes(repo_result)
+            all_repo_changes.append(repo_changes)
             
-            if rule_name in manual_rules:
-                print("SKIPPED (requires manual action)")
-                self.skipped.append({
-                    "rule": rule_name,
-                    "reason": "Cannot be applied automatically - requires manual intervention"
-                })
-                continue
-            
-            if rule_name in auto_apply_rules:
-                compliant_value, _ = auto_apply_rules[rule_name]
-                apply_result = self.apply_rule(rule_name, current_value, compliant_value)
-                
-                if apply_result["success"]:
-                    self.changes_made.append(apply_result)
-                    if self.dry_run:
-                        print(f"Would apply ({compliant_value})")
-                    else:
-                        print(f"Applied ({compliant_value}) ✓")
+            for change in repo_changes["changes"]:
+                action = change.get("action", "Applied")
+                if self.dry_run:
+                    print(f"      - {action}")
                 else:
-                    self.errors.append(apply_result)
-                    print(f"ERROR: {apply_result.get('error', 'Unknown error')}")
-            else:
-                print("SKIPPED (unknown rule)")
-                self.skipped.append({
-                    "rule": rule_name,
-                    "reason": "Unknown rule - not in auto-apply list"
-                })
+                    print(f"      - {action} ✓")
+                self.changes_made.append(change)
+            
+            for error in repo_changes["errors"]:
+                print(f"      - ERROR: {error.get('error', 'Unknown error')}")
+                self.errors.append(error)
+            
+            for skip in repo_changes["skipped"]:
+                print(f"      - SKIPPED: {skip['rule']} ({skip['reason']})")
+                self.skipped.append(skip)
         
         # Summary
         print("\n" + "-" * 40)
         print("APPLY SUMMARY")
         print("-" * 40)
         print(f"  Backup file: {backup_file}")
-        print(f"  Successfully applied: {len(self.changes_made)}")
-        print(f"  Skipped (manual action required): {len(self.skipped)}")
+        print(f"  Repositories processed: {len(non_compliant)}")
+        print(f"  Changes made: {len(self.changes_made)}")
+        print(f"  Skipped (requires manual action): {len(self.skipped)}")
         print(f"  Errors: {len(self.errors)}")
         
         if self.dry_run:
             print("\n  *** DRY RUN - No actual changes were made ***")
             print(f"  Run without --dry-run to apply {len(self.changes_made)} changes")
         
-        if self.skipped:
-            print("\n  Manual action required for:")
-            for item in self.skipped:
-                print(f"    - {item['rule']}: {item['reason']}")
-        
         return {
             "backup_file": backup_file,
+            "repositories_processed": len(non_compliant),
             "changes_made": len(self.changes_made),
             "skipped": len(self.skipped),
             "errors": len(self.errors),
@@ -1329,13 +1668,20 @@ class OrgComplianceApplier:
 # ROLLBACK FUNCTIONALITY
 # =============================================================================
 
-def rollback_from_backup(api_client, backup_file):
+def rollback_from_backup(api_client, backup_file, org_name):
     """
-    Restore organization settings from a backup file.
+    Restore repository settings from a backup file.
+    
+    Note: This can restore:
+    - Repository visibility (private/public)
+    - Archived status
+    - Webhook SSL settings
+    - (Re-adding collaborators and teams would require storing their permissions)
     
     Args:
         api_client: GitHubAPIClient instance
         backup_file: Path to backup JSON file
+        org_name: Organization name
     
     Returns:
         dict: Summary of rollback results
@@ -1349,37 +1695,71 @@ def rollback_from_backup(api_client, backup_file):
         backup_data = json.load(f)
     
     org = backup_data["organization"]
-    settings = backup_data["settings"]
+    repos = backup_data["repositories"]
     
     print(f"\n  Backup from: {backup_data['timestamp']}")
     print(f"  Organization: {org}")
+    print(f"  Repositories in backup: {len(repos)}")
     
-    # Fields that can be restored
-    restorable_fields = [
-        "default_repository_permission",
-        "members_can_invite_outside_collaborators",
-        "members_can_create_public_repositories",
-        "members_can_change_repo_visibility",
-        "members_can_delete_repositories",
-        "members_can_create_teams"
-    ]
-    
-    print("\n  Restoring settings...")
     restored = 0
     errors = []
     
-    for field in restorable_fields:
-        value = settings.get(field)
-        if value is not None:
-            print(f"    {field}: ", end="")
+    print("\n  Restoring settings...")
+    
+    for repo_backup in repos:
+        repo_name = repo_backup["repository"]
+        print(f"\n    {repo_name}:")
+        
+        # Restore visibility
+        original_private = repo_backup.get("private")
+        if original_private is not None:
             try:
-                api_client.patch(f"/orgs/{org}", {field: value})
-                print(f"Restored to {value} ✓")
+                api_client.patch(f"/repos/{org}/{repo_name}", {"private": original_private})
+                print(f"      - Visibility: {'private' if original_private else 'public'} ✓")
                 restored += 1
                 time.sleep(SLEEP_INTERVAL)
             except requests.exceptions.HTTPError as e:
-                print(f"ERROR: {e}")
-                errors.append({"field": field, "error": str(e)})
+                print(f"      - Visibility: ERROR: {e}")
+                errors.append({"repo": repo_name, "field": "visibility", "error": str(e)})
+        
+        # Restore archived status
+        original_archived = repo_backup.get("archived")
+        if original_archived is not None:
+            try:
+                api_client.patch(f"/repos/{org}/{repo_name}", {"archived": original_archived})
+                print(f"      - Archived: {original_archived} ✓")
+                restored += 1
+                time.sleep(SLEEP_INTERVAL)
+            except requests.exceptions.HTTPError as e:
+                print(f"      - Archived: ERROR: {e}")
+                errors.append({"repo": repo_name, "field": "archived", "error": str(e)})
+        
+        # Restore webhook SSL settings
+        for hook in repo_backup.get("hooks", []):
+            hook_id = hook.get("id")
+            original_ssl = hook.get("config", {}).get("insecure_ssl")
+            if hook_id and original_ssl is not None:
+                try:
+                    api_client.patch(
+                        f"/repos/{org}/{repo_name}/hooks/{hook_id}",
+                        {"config": {"insecure_ssl": str(original_ssl)}}
+                    )
+                    print(f"      - Hook {hook_id} SSL: {original_ssl} ✓")
+                    restored += 1
+                    time.sleep(SLEEP_INTERVAL)
+                except requests.exceptions.HTTPError as e:
+                    print(f"      - Hook {hook_id}: ERROR: {e}")
+                    errors.append({"repo": repo_name, "hook": hook_id, "error": str(e)})
+        
+        # Note: Re-adding collaborators and teams would require storing their
+        # original permission levels, which is more complex. Just log info.
+        if repo_backup.get("outside_collaborators"):
+            print(f"      - Note: {len(repo_backup['outside_collaborators'])} outside collaborators were removed")
+            print(f"        Re-add manually: {repo_backup['outside_collaborators']}")
+        
+        if repo_backup.get("direct_collaborators"):
+            print(f"      - Note: {len(repo_backup['direct_collaborators'])} direct collaborators were removed")
+            print(f"        Re-add manually: {repo_backup['direct_collaborators']}")
     
     # Summary
     print("\n" + "-" * 40)
@@ -1402,26 +1782,33 @@ def rollback_from_backup(api_client, backup_file):
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="GitHub Organization Compliance Checker & Enforcer",
+        description="GitHub Repository Compliance Checker & Enforcer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --check              Check compliance (default, report only)
-  %(prog)s --apply              Apply compliant settings to organization
-  %(prog)s --apply --dry-run    Preview changes without applying
-  %(prog)s --rollback backup.json  Restore settings from backup file
+  %(prog)s --check                    Check compliance (default, report only)
+  %(prog)s --repo my-repo             Check only a specific repository
+  %(prog)s --apply                    Apply compliant settings to all repos
+  %(prog)s --apply --dry-run          Preview changes without applying
+  %(prog)s --repo my-repo --apply     Apply fixes to one repo only
+  %(prog)s --rollback backup.json     Restore settings from backup file
+  %(prog)s --qualification-only       Only check if org requires compliance
 
 Settings that can be applied automatically:
-  - default_repository_permission (set to 'none')
-  - org_outside_collaborators (disable)
-  - members_can_create_public_repositories (disable)
-  - visibility_change_disabled (disable changes)
-  - delete_transfer_disabled (disable deletions)
-  - team_creation_disabled (disable team creation)
+  - unsecure_hooks (enable SSL verification on webhooks)
+  - collaborators_in_org (remove outside collaborators)
+  - collaborators_in_team (remove direct collaborators)
+  - shared_repo_readers (remove Cloud_Readers team access)
+  - private_if_sensitive (make repository private)
+  - archived_status (unarchive repository)
 
 Settings that require manual action:
-  - unsecure_org_hooks (webhook SSL must be enabled manually)
-  - admin_activity_6_months (governance review needed)
+  - metadata_existing (.metadata file must be created manually)
+
+Organization Qualification:
+  Compliance checks only apply to organizations that contain at least
+  one repository with production_code, ip_sensitive, or security_sensitive = yes.
+  If qualified, ALL repos in the org must be checked (not just sensitive ones).
         """
     )
     
@@ -1435,7 +1822,7 @@ Settings that require manual action:
     mode_group.add_argument(
         "--apply", "-a",
         action="store_true",
-        help="Apply compliant settings to organization"
+        help="Apply compliant settings to non-compliant repositories"
     )
     mode_group.add_argument(
         "--rollback", "-r",
@@ -1447,6 +1834,12 @@ Settings that require manual action:
         "--dry-run", "-n",
         action="store_true",
         help="Preview changes without applying (use with --apply)"
+    )
+    
+    parser.add_argument(
+        "--repo",
+        metavar="REPO_NAME",
+        help="Target a specific repository (for testing before org-wide apply)"
     )
     
     parser.add_argument(
@@ -1473,7 +1866,7 @@ def main():
     args = parse_arguments()
     
     print("\n" + "=" * 60)
-    print("GHE ORGANIZATION COMPLIANCE CHECKER")
+    print("GHE REPOSITORY COMPLIANCE CHECKER")
     print("=" * 60)
     
     # Validate configuration
@@ -1487,6 +1880,8 @@ def main():
     print(f"\nConfiguration:")
     print(f"  Organization: {GITHUB_ORG}")
     print(f"  API Base URL: {GITHUB_BASE}")
+    if args.repo:
+        print(f"  Target Repo: {args.repo}")
     
     # Initialize API client
     api_client = GitHubAPIClient(GITHUB_BASE, GITHUB_TOKEN)
@@ -1494,7 +1889,7 @@ def main():
     # Handle ROLLBACK mode
     if args.rollback:
         print(f"  Mode: ROLLBACK from {args.rollback}")
-        rollback_from_backup(api_client, args.rollback)
+        rollback_from_backup(api_client, args.rollback, GITHUB_ORG)
         print("\n" + "=" * 60)
         return
     
@@ -1506,6 +1901,8 @@ def main():
     # - production_code = yes, OR
     # - ip_sensitive = yes, OR
     # - security_sensitive = yes
+    #
+    # If qualified: ALL repos in the org must be checked (not just sensitive ones)
     # =========================================================================
     
     if not args.skip_qualification:
@@ -1513,7 +1910,7 @@ def main():
         qual_result = qual_checker.check_qualification()
         
         # Save qualification result
-        qual_report_file = f"org_qualification_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+        qual_report_file = f"repo_qualification_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
         with open(qual_report_file, "w", encoding="utf-8") as f:
             json.dump({
                 "timestamp": datetime.now().isoformat(),
@@ -1547,45 +1944,60 @@ def main():
     else:
         print(f"  Mode: CHECK (report only)")
     
-    # Run compliance checks
-    checker = OrgComplianceChecker(api_client, GITHUB_ORG)
+    # Initialize checker and run checks
+    checker = RepoComplianceChecker(api_client, GITHUB_ORG)
     results = checker.run_all_checks()
     
-    # Print pre-apply summary
-    passed = sum(1 for r in results if r["passed"])
-    failed = sum(1 for r in results if not r["passed"])
-    required_failed = sum(1 for r in results if not r["passed"] and r["enforcement"] == "Required")
+    # Filter results if target repo specified
+    if args.repo:
+        results = [r for r in results if r["repository"] == args.repo]
+        if not results:
+            print(f"\n  Repository '{args.repo}' not found.")
+            return
+    
+    if not results:
+        print("\n  No repositories found in organization.")
+        return
+    
+    # Generate reports
+    report_gen = ReportGenerator(GITHUB_ORG, results)
+    report_gen.generate_all_reports()
+    
+    # Print summary
+    total_repos = len(results)
+    repos_with_issues = sum(1 for r in results if any(not rule["passed"] for rule in r["rules"]))
+    total_rules = sum(len(r["rules"]) for r in results)
+    total_failed = sum(1 for r in results for rule in r["rules"] if not rule["passed"])
     
     print("\n" + "=" * 60)
-    print("CHECK SUMMARY (BEFORE APPLY)")
+    print("CHECK SUMMARY")
     print("=" * 60)
-    print(f"  Total Rules: {len(results)}")
-    print(f"  Passed: {passed}")
-    print(f"  Failed: {failed}")
-    print(f"  Required Failed: {required_failed}")
+    print(f"  Repositories Checked: {total_repos}")
+    print(f"  Repositories with Issues: {repos_with_issues}")
+    print(f"  Compliant Repositories: {total_repos - repos_with_issues}")
+    print(f"  Total Rules Checked: {total_rules}")
+    print(f"  Failed Rules: {total_failed}")
     
-    if required_failed > 0:
-        print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review required rules!")
+    if repos_with_issues > 0:
+        print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review failed repositories!")
     else:
-        print("\n  ✅ All required rules passed!")
+        print("\n  ✅ All repositories are compliant!")
     
     # Handle APPLY mode
     if args.apply:
-        if failed == 0:
+        if repos_with_issues == 0:
             print("\n  No compliance issues to fix.")
         else:
-            # Get current org data for backup
-            current_org_data = checker.org_data
-            
-            applier = OrgComplianceApplier(api_client, GITHUB_ORG, dry_run=args.dry_run)
-            apply_result = applier.apply_all(results, current_org_data)
+            applier = RepoComplianceApplier(api_client, GITHUB_ORG, dry_run=args.dry_run)
+            apply_result = applier.apply_all(results, target_repo=args.repo)
             
             # Save apply results to file
-            apply_log_file = f"org_apply_log_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+            apply_log_file = f"repo_apply_log_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
             with open(apply_log_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "timestamp": datetime.now().isoformat(),
                     "organization": GITHUB_ORG,
+                    "target_repo": args.repo,
                     "dry_run": args.dry_run,
                     "summary": apply_result,
                     "changes": applier.changes_made,
@@ -1593,51 +2005,6 @@ def main():
                     "errors": applier.errors
                 }, f, indent=2, default=str)
             print(f"\n  Apply log saved: {apply_log_file}")
-            
-            # Re-run checks after apply so reports reflect updated state
-            if not args.dry_run and applier.changes_made:
-                print("\n  Re-checking compliance after applying fixes...")
-                checker2 = OrgComplianceChecker(api_client, GITHUB_ORG)
-                results = checker2.run_all_checks()
-                
-                # Mark rules that were skipped (manual action) as INFO instead of FAIL
-                manual_rule_names = [s["rule"] for s in applier.skipped]
-                for r in results:
-                    if not r["passed"] and r["rule"] in manual_rule_names:
-                        r["status"] = "INFO"
-                        r["reason"] = r["reason"] + " [INFO: Cannot be applied automatically - requires manual action.]"
-                
-                # Print post-apply summary
-                passed = sum(1 for r in results if r["passed"])
-                info_count = sum(1 for r in results if r.get("status") == "INFO")
-                failed = sum(1 for r in results if not r["passed"] and r.get("status") != "INFO")
-                required_failed = sum(1 for r in results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required")
-                
-                print("\n" + "=" * 60)
-                print("CHECK SUMMARY (AFTER APPLY)")
-                print("=" * 60)
-                print(f"  Total Rules: {len(results)}")
-                print(f"  Passed: {passed}")
-                print(f"  Failed: {failed}")
-                print(f"  Info (manual action needed): {info_count}")
-                print(f"  Required Failed: {required_failed}")
-                
-                if failed > 0:
-                    print("\n  ⚠️  Some rules still failing:")
-                    for r in results:
-                        if not r["passed"] and r.get("status") != "INFO":
-                            print(f"       - {r['rule']} ({r['enforcement']})")
-                if info_count > 0:
-                    print("\n  ℹ️  Rules requiring manual action:")
-                    for r in results:
-                        if r.get("status") == "INFO":
-                            print(f"       - {r['rule']} ({r['enforcement']})")
-                if failed == 0 and info_count == 0:
-                    print("\n  ✅ All rules now passing!")
-    
-    # Generate reports (after apply if applicable, so reports reflect final state)
-    report_gen = ReportGenerator(GITHUB_ORG, results)
-    report_gen.generate_all_reports()
     
     print("\n" + "=" * 60)
 
