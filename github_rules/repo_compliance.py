@@ -1528,19 +1528,31 @@ class RepoComplianceApplier:
                     "branch": repo_result.get("default_branch", "master")
                 }
                 if not self.dry_run:
-                    resp = self.api.put(url, data)
-                    if resp and resp.get("content"):
-                        repo_changes["changes"].append({
-                            "rule": rule_name,
-                            "action": "Created .metadata file",
-                            "location": "root",
-                            "success": True
-                        })
-                    else:
-                        repo_changes["errors"].append({
-                            "rule": rule_name,
-                            "error": "Failed to create .metadata file"
-                        })
+                    try:
+                        resp = self.api.put(url, data)
+                        if resp and resp.get("content"):
+                            repo_changes["changes"].append({
+                                "rule": rule_name,
+                                "action": "Created .metadata file",
+                                "location": "root",
+                                "success": True
+                            })
+                        else:
+                            repo_changes["errors"].append({
+                                "rule": rule_name,
+                                "error": "Failed to create .metadata file"
+                            })
+                    except requests.exceptions.HTTPError as e:
+                        if e.response is not None and e.response.status_code == 409:
+                            repo_changes["skipped"].append({
+                                "rule": rule_name,
+                                "reason": ".metadata already exists (409 Conflict), skipping"
+                            })
+                        else:
+                            repo_changes["errors"].append({
+                                "rule": rule_name,
+                                "error": f"HTTP error creating .metadata: {e}"
+                            })
                 else:
                     repo_changes["changes"].append({
                         "rule": rule_name,
