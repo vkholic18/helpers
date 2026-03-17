@@ -1515,17 +1515,13 @@ def main():
     checker = OrgComplianceChecker(api_client, GITHUB_ORG)
     results = checker.run_all_checks()
     
-    # Generate reports
-    report_gen = ReportGenerator(GITHUB_ORG, results)
-    report_gen.generate_all_reports()
-    
-    # Print summary
+    # Print pre-apply summary
     passed = sum(1 for r in results if r["passed"])
     failed = sum(1 for r in results if not r["passed"])
     required_failed = sum(1 for r in results if not r["passed"] and r["enforcement"] == "Required")
     
     print("\n" + "=" * 60)
-    print("CHECK SUMMARY")
+    print("CHECK SUMMARY (BEFORE APPLY)")
     print("=" * 60)
     print(f"  Total Rules: {len(results)}")
     print(f"  Passed: {passed}")
@@ -1561,6 +1557,37 @@ def main():
                     "errors": applier.errors
                 }, f, indent=2, default=str)
             print(f"\n  Apply log saved: {apply_log_file}")
+            
+            # Re-run checks after apply so reports reflect updated state
+            if not args.dry_run and applier.changes_made:
+                print("\n  Re-checking compliance after applying fixes...")
+                checker2 = OrgComplianceChecker(api_client, GITHUB_ORG)
+                results = checker2.run_all_checks()
+                
+                # Print post-apply summary
+                passed = sum(1 for r in results if r["passed"])
+                failed = sum(1 for r in results if not r["passed"])
+                required_failed = sum(1 for r in results if not r["passed"] and r["enforcement"] == "Required")
+                
+                print("\n" + "=" * 60)
+                print("CHECK SUMMARY (AFTER APPLY)")
+                print("=" * 60)
+                print(f"  Total Rules: {len(results)}")
+                print(f"  Passed: {passed}")
+                print(f"  Failed: {failed}")
+                print(f"  Required Failed: {required_failed}")
+                
+                if failed > 0:
+                    print("\n  ⚠️  Some rules still failing (manual action required):")
+                    for r in results:
+                        if not r["passed"]:
+                            print(f"       - {r['rule']} ({r['enforcement']})")
+                else:
+                    print("\n  ✅ All rules now passing!")
+    
+    # Generate reports (after apply if applicable, so reports reflect final state)
+    report_gen = ReportGenerator(GITHUB_ORG, results)
+    report_gen.generate_all_reports()
     
     print("\n" + "=" * 60)
 
