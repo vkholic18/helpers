@@ -1595,17 +1595,17 @@ def main():
             print(f"\n  Apply log saved: {apply_log_file}")
             
             # Re-run checks after apply so reports reflect updated state
-            if not args.dry_run and applier.changes_made:
+            if not args.dry_run:
                 print("\n  Re-checking compliance after applying fixes...")
                 checker2 = OrgComplianceChecker(api_client, GITHUB_ORG)
                 results = checker2.run_all_checks()
                 
-                # Mark rules that were skipped (manual action) as INFO instead of FAIL
-                manual_rule_names = [s["rule"] for s in applier.skipped]
+                # Mark ALL still-failing rules as INFO after apply
+                # (we already tried to fix them - remaining failures need manual action)
                 for r in results:
-                    if not r["passed"] and r["rule"] in manual_rule_names:
+                    if not r["passed"]:
                         r["status"] = "INFO"
-                        r["reason"] = r["reason"] + " [INFO: Cannot be applied automatically - requires manual action.]"
+                        r["reason"] = r["reason"] + " [INFO: Requires manual action to resolve.]"
                 
                 # Print post-apply summary
                 passed = sum(1 for r in results if r["passed"])
