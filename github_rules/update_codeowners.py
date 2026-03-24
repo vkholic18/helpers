@@ -125,6 +125,7 @@ def discover_production_repos(org):
         archived = repo_data.get("archived", False)
 
         if archived:
+            print(f"    SKIPPED (archived): {name}")
             continue
 
         if default_branch == "main":
@@ -186,6 +187,7 @@ def main():
 
     updated = 0
     not_found = 0
+    skipped_protected = 0
     errors = 0
 
     for repo_info in repos:
@@ -214,6 +216,9 @@ def main():
             print(f"  UPDATED: {repo}/{path}")
             print(f"    URL: {GITHUB_WEB}/{GITHUB_ORG}/{repo}/blob/{branch}/{path}")
             updated += 1
+        elif resp.status_code == 409:
+            print(f"  SKIPPED (409 conflict): {repo}/{path} - branch is protected, run this script BEFORE applying branch protection")
+            skipped_protected += 1
         else:
             print(f"  ERROR: {repo}/{path} - HTTP {resp.status_code}")
             errors += 1
@@ -224,6 +229,7 @@ def main():
     print(f"  Production repos found: {len(repos)}")
     print(f"  CODEOWNERS updated: {updated}")
     print(f"  CODEOWNERS not found: {not_found}")
+    print(f"  Skipped (409 - branch protected): {skipped_protected}")
     print(f"  Errors: {errors}")
 
 
