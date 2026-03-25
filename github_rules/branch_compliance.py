@@ -1093,7 +1093,7 @@ class BranchComplianceChecker:
         rules.append(self.check_code_owners_review(protection))
         rules.append(self.check_require_last_push_approval(protection))
         rules.append(self.check_not_bypass(protection))
-        rules.append(self.check_codeowners_existing(repo_name, default_branch))
+        rules.append(self.check_codeowners_existing(repo_name, "master"))
         
         # Recommended rules
         rules.append(self.check_status_check(protection))
@@ -1195,7 +1195,7 @@ class BranchComplianceChecker:
         
         total_branches = sum(r["total_branches"] for r in self.results)
         print(f"\n  Checked {total_branches} production branches across {len(self.results)} production repositories")
-        print(f"  Skipped {skipped_count} repositories (no .metadata, production_code!=yes, or empty production_branches)")
+        print(f"  Skipped {skipped_count} repositories (archived, default branch 'main', no .metadata, production_code!=yes, or empty production_branches)")
         
         return self.results
 
@@ -1509,16 +1509,27 @@ class BranchProtectionApplier:
         if existing_protection:
             existing_status_checks = existing_protection.get("required_status_checks")
         
-        # Convert existing status checks to proper format if they exist
-        status_checks_payload = None
+        # Convert existing status checks to proper format if they exist.
+        # Always set strict=True for branch_uptodate rule compliance.
+        # If no status checks exist yet, create a minimal object with
+        # strict=True and an empty checks list so that branch_uptodate
+        # is enforced.  (status_check itself is NOT auto-created because
+        # it requires an actual CI/CD pipeline.)
         if existing_status_checks:
             checks = existing_status_checks.get("checks", []) or existing_status_checks.get("contexts", [])
             # Convert contexts (strings) to checks format if needed
             if checks and isinstance(checks[0], str):
                 checks = [{"context": c} for c in checks]
             status_checks_payload = {
-                "strict": existing_status_checks.get("strict", True),
+                "strict": True,  # Rule: branch_uptodate
                 "checks": checks
+            }
+        else:
+            # No CI checks configured yet — still enable strict mode
+            # so branch_uptodate is enforced once checks are added.
+            status_checks_payload = {
+                "strict": True,  # Rule: branch_uptodate
+                "checks": []
             }
         
         payload = {
@@ -1703,7 +1714,18 @@ class BranchProtectionApplier:
                     for rule in branch_result["rules"]
                 )
                 
-                if required_failed:
+                # Also check settings-based Recommended rules that can be
+                # applied without external CI/CD setup.
+                # status_check is excluded because it needs an actual CI pipeline.
+                applyable_recommended = {"conversation_resolution", "branch_uptodate"}
+                recommended_failed = any(
+                    not rule["passed"]
+                    and rule["enforcement"] == "Recommended"
+                    and rule["rule"] in applyable_recommended
+                    for rule in branch_result["rules"]
+                )
+                
+                if required_failed or recommended_failed:
                     non_compliant.append({
                         "repository": repo_name,
                         "branch": branch_name,
@@ -1711,7 +1733,10 @@ class BranchProtectionApplier:
                         "has_protection": branch_result["has_protection"],
                         "failed_rules": [
                             rule["rule"] for rule in branch_result["rules"]
-                            if not rule["passed"] and rule["enforcement"] == "Required"
+                            if not rule["passed"] and (
+                                rule["enforcement"] == "Required"
+                                or rule["rule"] in applyable_recommended
+                            )
                         ]
                     })
         
