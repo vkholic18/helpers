@@ -1429,7 +1429,8 @@ class RepoComplianceApplier:
             "ic4v-platform-team-synlab", "license-expiry-reminder",
             "logger-agent-config", "onepipeline-compliance-incident-issues",
             "onepipeline-compliance-evidence-locker",
-            "onepipeline-compliance-inventory", "kmip4hpcs_monitor"
+            "onepipeline-compliance-inventory", "kmip4hpcs_monitor",
+            "common-automation", "ic4v-licensing-distro", "ic4v-vcfvpc-tests"
         ]
         
         for rule in failed_rules:
