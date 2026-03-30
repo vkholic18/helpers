@@ -253,6 +253,8 @@ class OrgQualificationChecker:
             # Fix smart/curly quotes that break JSON parsing
             content = content.replace('\u201c', '"').replace('\u201d', '"')
             content = content.replace('\u2018', "'").replace('\u2019', "'")
+            # Fix non-breaking spaces (U+00A0) that break JSON/YAML parsing
+            content = content.replace('\u00a0', ' ')
             
             if YAML_AVAILABLE:
                 try:
@@ -424,6 +426,8 @@ class RepoComplianceChecker:
                 # Fix smart/curly quotes that break JSON parsing
                 content = content.replace('\u201c', '"').replace('\u201d', '"')
                 content = content.replace('\u2018', "'").replace('\u2019', "'")
+                # Fix non-breaking spaces (U+00A0) that break JSON/YAML parsing
+                content = content.replace('\u00a0', ' ')
                 
                 if YAML_AVAILABLE:
                     try:
