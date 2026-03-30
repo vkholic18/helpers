@@ -404,20 +404,41 @@ class RepoComplianceChecker:
                 response = self.api.get(url, allow_404=True)
                 time.sleep(SLEEP_INTERVAL)
                 if not response:
+                    print(f"      DEBUG [{repo_name}]: API returned 404 - .metadata not found on branch '{default_branch}'")
                     return None
-                content = base64.b64decode(response.get("content", "")).decode("utf-8")
+                
+                raw_content = response.get("content", "")
+                if not raw_content:
+                    print(f"      DEBUG [{repo_name}]: API returned response but 'content' field is empty")
+                    return None
+                
+                content = base64.b64decode(raw_content).decode("utf-8")
+                print(f"      DEBUG [{repo_name}]: .metadata fetched OK, {len(content)} chars")
+                print(f"      DEBUG [{repo_name}]: First 200 chars: {content[:200]!r}")
+                
+                # Check for non-ASCII characters that could break parsing
+                non_ascii = [(i, ch, f'U+{ord(ch):04X}') for i, ch in enumerate(content) if ord(ch) > 127]
+                if non_ascii:
+                    print(f"      DEBUG [{repo_name}]: Found {len(non_ascii)} non-ASCII chars: {non_ascii[:10]}")
+                
                 # Fix smart/curly quotes that break JSON parsing
                 content = content.replace('\u201c', '"').replace('\u201d', '"')
                 content = content.replace('\u2018', "'").replace('\u2019', "'")
+                
                 if YAML_AVAILABLE:
                     try:
-                        return yaml.safe_load(content)
+                        result = yaml.safe_load(content)
+                        print(f"      DEBUG [{repo_name}]: YAML parse SUCCESS")
+                        return result
                     except Exception as e:
                         print(f"      WARNING: YAML parse failed for {repo_name}: {e}")
                 try:
-                    return json.loads(content)
+                    result = json.loads(content)
+                    print(f"      DEBUG [{repo_name}]: JSON parse SUCCESS")
+                    return result
                 except Exception as e:
                     print(f"      WARNING: JSON parse failed for {repo_name}: {e}")
+                    print(f"      DEBUG [{repo_name}]: Full content after fix:\n{content}")
                 return None
             except requests.exceptions.ConnectionError as e:
                 print(f"      WARNING: Connection error fetching .metadata for {repo_name} (attempt {attempt+1}/{retries}): {e}")
