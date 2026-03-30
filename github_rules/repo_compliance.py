@@ -250,17 +250,20 @@ class OrgQualificationChecker:
         
         try:
             content = base64.b64decode(response.get("content", "")).decode("utf-8")
+            # Fix smart/curly quotes that break JSON parsing
+            content = content.replace('\u201c', '"').replace('\u201d', '"')
+            content = content.replace('\u2018', "'").replace('\u2019', "'")
             
             if YAML_AVAILABLE:
                 try:
                     return yaml.safe_load(content)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"      WARNING: YAML parse failed for {repo_name}: {e}")
             
             try:
                 return json.loads(content)
-            except:
-                pass
+            except Exception as e:
+                print(f"      WARNING: JSON parse failed for {repo_name}: {e}")
             
             return None
         except Exception:
@@ -403,15 +406,18 @@ class RepoComplianceChecker:
                 if not response:
                     return None
                 content = base64.b64decode(response.get("content", "")).decode("utf-8")
+                # Fix smart/curly quotes that break JSON parsing
+                content = content.replace('\u201c', '"').replace('\u201d', '"')
+                content = content.replace('\u2018', "'").replace('\u2019', "'")
                 if YAML_AVAILABLE:
                     try:
                         return yaml.safe_load(content)
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"      WARNING: YAML parse failed for {repo_name}: {e}")
                 try:
                     return json.loads(content)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"      WARNING: JSON parse failed for {repo_name}: {e}")
                 return None
             except requests.exceptions.ConnectionError as e:
                 print(f"      WARNING: Connection error fetching .metadata for {repo_name} (attempt {attempt+1}/{retries}): {e}")
