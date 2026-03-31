@@ -495,6 +495,9 @@ class OrgComplianceChecker:
                 "Outside collaborators cannot be added by repository administrators."
             )
         }
+        # Remove any accidental status: INFO for this rule
+        if not passed:
+            result.pop("status", None)
         self.results.append(result)
         return result
     
