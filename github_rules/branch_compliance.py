@@ -299,6 +299,10 @@ class OrgQualificationChecker:
             return None
         try:
             content = base64.b64decode(response.get("content", "")).decode("utf-8")
+            # Fix non-breaking spaces and smart quotes that break parsing
+            content = content.replace('\u00a0', ' ')
+            content = content.replace('\u201c', '"').replace('\u201d', '"')
+            content = content.replace('\u2018', "'").replace('\u2019', "'")
             if YAML_AVAILABLE:
                 try:
                     return yaml.safe_load(content)
@@ -419,6 +423,13 @@ class BranchComplianceChecker:
         self.org = org_name
         self.target_repo = target_repo
         self.results = []
+        # Set of repos to skip status_check rule
+        self.status_check_skip_repos = set([
+            # Tornado repos
+            "vcloud", "vcd-bin-vdbc", "vcd-tracking-service", "vcd-mgmt-e2e", "skytap-console", "images", "schematics", "ic4v-golang-sdk", "ic4v-java-sdk", "vcd-metrics-collector", "ic4v-node-sdk", "managed-portal-and-billing-team", "vcd-iaas-vra", "UX-Design", "console_scan", "vmwaresolutions-synlab", "vpc-msql", "istio-egress-control", "svt-automation-ui", "VRA-G1-FRA-PRD", "VRA-G1-DAL-PRD", "VRA-G1-PAR-PRD", "auditree_config", "IC4V-lifecycle-image", "common-scripts", "ci-pipeline-defs",
+            # vmwsolution repos
+            "ic4v-sddc", "ic4v-releases", "ansible", "ic4v-account", "ic4v-bss-lib", "ic4v-data", "TestRepo", "vpc-vmware-bare-metal-template", "atlas-dashboard", "mzr-toolchain", "vpc-vmware-bare-metal-temp", "vmware-aha-reports", "iaas-epics_linked", "vpc-vmware-blueprint", "vpc-vmware-clouddriver", "vpc-vmware-vpc", "ic4v-kmip-adapter", "vpc-vmware-iaas", "vpc-vmware-configure", "vpc-vmware-bastion", "ic4v-license-check-result", "devops_tracker", "auditree_config", "internal-docs", "vsphere-automation-sdk-python", "change-management", "vpc-demo-3tier", "auto-infra-devops", "auditree-vuln-scan-output", "ic4v-vpc-vsi-roks-bastion", "nonprod_auditree_config", "nonprod_auditree_evidence_locker", "ic4v-performance", "iaas-mgmt", "onepipeline-compliance-inventory", "ic4v-licensing", "ic4v-veeam-kpi-collector", "rmc_xls_part_price_compare", "g11n-tracker", "ic4v-cos-sync", "ic4v-vm-operations", "security-scans-compliance-issues", "security-scans-compliance-inventory-bak", "security-scans-compliance-evidence-bak", "ic4v-licensing-service-iac", "submission_evidence_utils", "ic4v-secrets-operator", "ic4v-secrets-sync", "MT-price-change-202401", "ic4v-ad-learning", "ic4v-secrets-inventory", "ic4v-sm-migrate", "devtest-compliance", "devtest-compliance-sos", "onepipeline-compliance-evidence-locker", "ic4v-cot", "monitoring", "ic4v-logging-demo", "gen2utility", "ic4v-srx-configs", "ic4v-syslog-demo", "ic4v-vmca-cli", "ic4v-security", "WIP-SLA", "ic4v-governance", "ic4v-srx-configs-change-log", "ansible-change-log", "ansible-password-rotation", "ic4v-vmca-playbooks", "openapi-client-generator", "ic4v-secrets-placeholder-creator", "vm_system_uuid_reset", "ic4v-secrets-operator-v2", "copy_dev_cos_to_stag", "ansible-monitoring", "ansible-health-checks", "ic4v-license-inventory", "PlatformDevOps", "security-compliance-output", "titan", "ic4v-pipeline-iac", "workernodeupdatelogs", "ic4v-license-ui", "icl_alerts", "ic4v-external-apis-lib", "vcd-iaas-vra", "vcd-iaas-vro-g2", "ic4v-vmca-scripts", "iaas-vro-g2", "security-scans-compliance-evidence", "security-scans-compliance-inventory", "ic4v-cos-sync-tekton", "rvtools-vpc-transformer"
+        ])
     
     def get_repositories(self):
         """Fetch all non-archived repositories in the organization."""
@@ -456,6 +467,10 @@ class BranchComplianceChecker:
         
         try:
             content = base64.b64decode(response.get("content", "")).decode("utf-8")
+            # Fix non-breaking spaces and smart quotes that break parsing
+            content = content.replace('\u00a0', ' ')
+            content = content.replace('\u201c', '"').replace('\u201d', '"')
+            content = content.replace('\u2018', "'").replace('\u2019', "'")
             
             if YAML_AVAILABLE:
                 try:
@@ -935,7 +950,10 @@ class BranchComplianceChecker:
     # RECOMMENDED RULES
     # =========================================================================
     
-    def check_status_check(self, protection):
+    def check_status_check(self, protection, repo_name=None):
+        # Skip this rule for repos in the skip list
+        if repo_name and repo_name in self.status_check_skip_repos:
+            return None
         """
         RECOMMENDED RULE: status_check
         
@@ -1096,7 +1114,9 @@ class BranchComplianceChecker:
         rules.append(self.check_codeowners_existing(repo_name, "master"))
         
         # Recommended rules
-        rules.append(self.check_status_check(protection))
+        status_check_result = self.check_status_check(protection, repo_name=repo_name)
+        if status_check_result is not None:
+            rules.append(status_check_result)
         rules.append(self.check_branch_uptodate(protection))
         rules.append(self.check_conversation_resolution(protection))
         
