@@ -639,7 +639,8 @@ class OrgComplianceChecker:
                 "accidental exposure of private repositories to the public."
                 if not passed else
                 "Repository visibility changes are appropriately restricted."
-            )
+            ),
+            "status": "INFO" if not passed else None
         }
         self.results.append(result)
         return result
@@ -678,7 +679,8 @@ class OrgComplianceChecker:
                 "accidental or malicious loss of code and history."
                 if not passed else
                 "Repository deletion/transfer is appropriately restricted."
-            )
+            ),
+            "status": "INFO" if not passed else None
         }
         self.results.append(result)
         return result
@@ -717,7 +719,8 @@ class OrgComplianceChecker:
                 "through AccessHub and create unauthorized access patterns."
                 if not passed else
                 "Team creation is appropriately restricted to admins."
-            )
+            ),
+            "status": "INFO" if not passed else None
         }
         self.results.append(result)
         return result
@@ -789,7 +792,8 @@ class OrgComplianceChecker:
                 f"{inactive_admins}. Inactive admins should be reviewed for access removal."
                 if not passed else
                 f"All {len(admins)} organization admins have recent activity."
-            )
+            ),
+            "status": "INFO" if not passed else None
         }
         self.results.append(result)
         return result
