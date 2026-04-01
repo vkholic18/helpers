@@ -856,6 +856,7 @@ class ReportGenerator:
                 "passed": sum(1 for r in self.results if r["passed"]),
                 "failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO"),
                 "info": sum(1 for r in self.results if r.get("status") == "INFO"),
+                "compliant": sum(1 for r in self.results if r["passed"] or r.get("status") == "INFO"),
                 "required_failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required"),
                 "recommended_failed": sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Recommended")
             },
@@ -875,6 +876,8 @@ class ReportGenerator:
         info_count = sum(1 for r in self.results if r.get("status") == "INFO")
         required_failed = sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required")
         
+        compliant = passed + info_count
+        compliance_pct = f"{(compliant/len(self.results)*100):.1f}%" if self.results else "N/A"
         lines = [
             "# Organization Compliance Report",
             "",
@@ -885,9 +888,10 @@ class ReportGenerator:
             "",
             f"- **Total Rules Checked:** {len(self.results)}",
             f"- **Passed:** {passed}",
-            f"- **Failed:** {failed}",
-            f"- **Info (Manual Action):** {info_count}",
+            f"- **Info (Manual Action - Compliant):** {info_count}",
+            f"- **Failed (Non-Compliant):** {failed}",
             f"- **Required Rules Failed:** {required_failed}",
+            f"- **Compliance:** {compliance_pct}",
             "",
         ]
         
@@ -968,6 +972,8 @@ class ReportGenerator:
         failed = sum(1 for r in self.results if not r["passed"] and r.get("status") != "INFO")
         info_count = sum(1 for r in self.results if r.get("status") == "INFO")
         
+        compliant = passed + info_count
+        compliance_pct = f"{(compliant/len(self.results)*100):.1f}%" if self.results else "N/A"
         summary_data = [
             ["Organization Compliance Report", ""],
             ["", ""],
@@ -976,9 +982,9 @@ class ReportGenerator:
             ["", ""],
             ["Total Rules", len(self.results)],
             ["Passed", passed],
-            ["Failed", failed],
-            ["Info (Manual Action)", info_count],
-            ["Compliance %", f"{(passed/len(self.results)*100):.1f}%" if self.results else "N/A"]
+            ["Info (Manual Action - Compliant)", info_count],
+            ["Failed (Non-Compliant)", failed],
+            ["Compliance %", compliance_pct]
         ]
         
         for row_idx, row in enumerate(summary_data, 1):
@@ -1557,16 +1563,21 @@ def main():
     
     # Print pre-apply summary
     passed = sum(1 for r in results if r["passed"])
-    failed = sum(1 for r in results if not r["passed"])
-    required_failed = sum(1 for r in results if not r["passed"] and r["enforcement"] == "Required")
+    info_count = sum(1 for r in results if r.get("status") == "INFO")
+    failed = sum(1 for r in results if not r["passed"] and r.get("status") != "INFO")
+    required_failed = sum(1 for r in results if not r["passed"] and r.get("status") != "INFO" and r["enforcement"] == "Required")
+    compliant = passed + info_count
+    compliance_pct = f"{(compliant/len(results)*100):.1f}%" if results else "N/A"
     
     print("\n" + "=" * 60)
     print("CHECK SUMMARY (BEFORE APPLY)")
     print("=" * 60)
     print(f"  Total Rules: {len(results)}")
     print(f"  Passed: {passed}")
-    print(f"  Failed: {failed}")
+    print(f"  Info (Manual Action - Compliant): {info_count}")
+    print(f"  Failed (Non-Compliant): {failed}")
     print(f"  Required Failed: {required_failed}")
+    print(f"  Compliance: {compliance_pct}")
     
     if required_failed > 0:
         print("\n  ⚠️  COMPLIANCE ISSUES DETECTED - Review required rules!")
