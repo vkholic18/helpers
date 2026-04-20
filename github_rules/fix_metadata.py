@@ -334,6 +334,11 @@ def process_archived_repo(api, repo_name, dry_run):
         return result
     print(f"    Step 1: {'(dry-run) unarchive OK' if dry_run else 'unarchived OK'}")
 
+    # Wait for GitHub to settle after unarchiving before writing
+    if not dry_run:
+        print(f"    Waiting 5s for GitHub to settle after unarchive...")
+        time.sleep(5)
+
     # Step 2: Add .metadata — check sha first so we overwrite if it exists
     print(f"    Step 2: adding .metadata...")
     sha = get_metadata_sha(api, repo_name, branch)
