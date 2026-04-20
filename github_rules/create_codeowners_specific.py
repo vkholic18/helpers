@@ -99,9 +99,19 @@ def find_codeowners(repo_name, branch):
     return None
 
 
+def get_codeowners_sha(repo_name, branch, path):
+    """Return the sha of an existing CODEOWNERS file at path, or None."""
+    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo_name}/contents/{path}?ref={branch}"
+    resp = session.get(url, verify=False, timeout=20)
+    if resp.status_code == 200:
+        return resp.json().get("sha")
+    return None
+
+
 def create_codeowners(repo_name, branch, dry_run):
     """
-    Create .github/CODEOWNERS (falls back to root CODEOWNERS on 409).
+    Create .github/CODEOWNERS (falls back to root CODEOWNERS).
+    On 409 (file exists but sha check missed it), fetches sha and retries as update.
 
     Returns:
         dict: {"success": bool, "path": str, "reason": str}
@@ -111,28 +121,44 @@ def create_codeowners(repo_name, branch, dry_run):
     if dry_run:
         return {"success": True, "path": ".github/CODEOWNERS", "reason": "(dry-run) would create .github/CODEOWNERS"}
 
-    # Try .github/CODEOWNERS first
-    url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo_name}/contents/.github/CODEOWNERS"
-    payload = {
-        "message": "Add CODEOWNERS for compliance",
-        "content": encoded,
-        "branch": branch,
-    }
-    resp = session.put(url, json=payload, verify=False, timeout=20)
+    for path, msg in [
+        (".github/CODEOWNERS", "Add CODEOWNERS for compliance"),
+        ("CODEOWNERS",         "Add CODEOWNERS for compliance (root)"),
+    ]:
+        url = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo_name}/contents/{path}"
+        payload = {"message": msg, "content": encoded, "branch": branch}
 
-    if resp.status_code in (200, 201):
-        return {"success": True, "path": ".github/CODEOWNERS", "reason": "created .github/CODEOWNERS"}
+        resp = session.put(url, json=payload, verify=False, timeout=20)
 
-    if resp.status_code == 409:
-        # .github/ directory conflict — fall back to root
-        url2 = f"{GITHUB_BASE}/repos/{GITHUB_ORG}/{repo_name}/contents/CODEOWNERS"
-        payload["message"] = "Add CODEOWNERS for compliance (root)"
-        resp2 = session.put(url2, json=payload, verify=False, timeout=20)
-        if resp2.status_code in (200, 201):
-            return {"success": True, "path": "CODEOWNERS", "reason": "created CODEOWNERS (root, .github/ conflict)"}
-        return {"success": False, "path": None, "reason": f".github/ got 409, root got {resp2.status_code}"}
+        if resp.status_code in (200, 201):
+            return {"success": True, "path": path, "reason": f"created {path}"}
 
-    return {"success": False, "path": None, "reason": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        if resp.status_code == 409:
+            # File exists but wasn't found by earlier GET — fetch sha and overwrite
+            print(f"    409 on {path} — fetching sha and retrying as update...")
+            sha = get_codeowners_sha(repo_name, branch, path)
+            if sha:
+                payload["sha"] = sha
+                payload["message"] = msg.replace("Add", "Update")
+                resp2 = session.put(url, json=payload, verify=False, timeout=20)
+                if resp2.status_code in (200, 201):
+                    return {"success": True, "path": path, "reason": f"updated {path} (already existed)"}
+                try:
+                    err = resp2.json().get("message", resp2.text)
+                except Exception:
+                    err = resp2.text
+                return {"success": False, "path": None, "reason": f"update failed HTTP {resp2.status_code}: {err}"}
+            # sha not found either — try next path
+            continue
+
+        # Any other error — report it
+        try:
+            err = resp.json().get("message", resp.text)
+        except Exception:
+            err = resp.text
+        return {"success": False, "path": None, "reason": f"HTTP {resp.status_code}: {err}"}
+
+    return {"success": False, "path": None, "reason": "both .github/CODEOWNERS and root CODEOWNERS failed"}
 
 
 # =============================================================================
