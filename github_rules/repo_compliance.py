@@ -898,9 +898,12 @@ class RepoComplianceChecker:
         
         return results
     
-    def run_all_checks(self):
+    def run_all_checks(self, target_repo=None):
         """
         Execute all repository compliance checks.
+        
+        Args:
+            target_repo: Optional repo name to check only a single repository.
         
         Returns:
             list: All repository check results
@@ -910,6 +913,13 @@ class RepoComplianceChecker:
         print("=" * 60)
         
         repos = self.get_repositories()
+        
+        if target_repo:
+            repos = [r for r in repos if r["name"] == target_repo]
+            if not repos:
+                print(f"\n  Repository '{target_repo}' not found in organization.")
+                return self.results
+            print(f"\n  Targeting single repository: {target_repo}")
         
         print(f"\n  Checking {len(repos)} repositories...")
         skipped_count = 0
@@ -1978,14 +1988,11 @@ def main():
     
     # Initialize checker and run checks
     checker = RepoComplianceChecker(api_client, GITHUB_ORG)
-    results = checker.run_all_checks()
+    results = checker.run_all_checks(target_repo=args.repo)
     
-    # Filter results if target repo specified
-    if args.repo:
-        results = [r for r in results if r["repository"] == args.repo]
-        if not results:
-            print(f"\n  Repository '{args.repo}' not found.")
-            return
+    if args.repo and not results:
+        print(f"\n  Repository '{args.repo}' not found or was skipped.")
+        return
     
     if not results:
         print("\n  No repositories found in organization.")
