@@ -126,9 +126,12 @@ ARCHIVED_REPOS = [
 ]
 
 # -----------------------------------------------------------------------------
-# Repos that are currently ACTIVE (not archived) — just add .metadata
+# Repos that are currently ACTIVE (not archived):
+#   - validation_error: .metadata exists but invalid → overwrite it
+#   - missing:          .metadata does not exist    → create it
 # -----------------------------------------------------------------------------
 ACTIVE_REPOS = [
+    # missing — .metadata does not exist
     "vcd-language-translation",
     "PIM_to_Secrete_Manager_ESXI_Automation",
     "ipops-vcd-dev-request",
@@ -145,6 +148,11 @@ ACTIVE_REPOS = [
     "onepipeline-compliance-incident-issues",
     "onepipeline-compliance-evidence-locker",
     "onepipeline-compliance-inventory",
+    # validation_error — .metadata exists but wrong content
+    "atlas-github-app-test-repo",
+    "veeam-customer-schedule",
+    "license-expiry-reminder",
+    "logger-agent-config",
 ]
 
 
@@ -185,7 +193,7 @@ class GitHubAPIClient:
 # =============================================================================
 
 def get_default_branch(api, repo_name):
-    """Return the default branch of a repo, or 'master' if unknown."""
+    """Return the default branch of a repo, or None if not found."""
     repo_data = api.get(f"/repos/{GITHUB_ORG}/{repo_name}", allow_404=True)
     time.sleep(SLEEP_INTERVAL)
     if not repo_data:
@@ -193,35 +201,40 @@ def get_default_branch(api, repo_name):
     return repo_data.get("default_branch", "master")
 
 
-def metadata_exists(api, repo_name, branch):
-    """Return True if .metadata already exists on the given branch."""
+def get_metadata_sha(api, repo_name, branch):
+    """Return the sha of the existing .metadata file, or None if it doesn't exist."""
     result = api.get(
         f"/repos/{GITHUB_ORG}/{repo_name}/contents/.metadata?ref={branch}",
         allow_404=True,
     )
     time.sleep(SLEEP_INTERVAL)
-    return result is not None
+    if result is None:
+        return None
+    return result.get("sha")
 
 
-def add_metadata(api, repo_name, branch, dry_run):
+def add_metadata(api, repo_name, branch, dry_run, sha=None):
     """
-    PUT .metadata onto the repo.
+    PUT .metadata onto the repo. If sha is provided, overwrites the existing file.
 
     Returns a dict:
       {"success": True/False, "skipped": True/False, "reason": str}
     """
+    action = "update" if sha else "create"
     if dry_run:
-        return {"success": True, "skipped": False, "reason": "(dry-run) would create .metadata"}
+        return {"success": True, "skipped": False, "reason": f"(dry-run) would {action} .metadata"}
 
     encoded = base64.b64encode(
         json.dumps(METADATA_CONTENT, indent=2).encode("utf-8")
     ).decode("utf-8")
 
     payload = {
-        "message": "Add .metadata file for compliance",
+        "message": "Add .metadata file for compliance" if not sha else "Update .metadata file for compliance",
         "content": encoded,
         "branch": branch,
     }
+    if sha:
+        payload["sha"] = sha
 
     response = api.put(
         f"/repos/{GITHUB_ORG}/{repo_name}/contents/.metadata", payload
@@ -229,11 +242,11 @@ def add_metadata(api, repo_name, branch, dry_run):
     time.sleep(SLEEP_INTERVAL)
 
     if response.status_code in (200, 201):
-        return {"success": True, "skipped": False, "reason": ".metadata created successfully"}
+        verb = "updated" if sha else "created"
+        return {"success": True, "skipped": False, "reason": f".metadata {verb} successfully"}
 
     if response.status_code in (409, 422):
-        # 422 = file already exists; 409 = conflict
-        return {"success": True, "skipped": True, "reason": ".metadata already exists — skipped"}
+        return {"success": True, "skipped": True, "reason": ".metadata already exists — skipped (use sha to overwrite)"}
 
     # Unexpected error
     try:
@@ -327,7 +340,8 @@ def process_archived_repo(api, repo_name, dry_run):
 def process_active_repo(api, repo_name, dry_run):
     """
     Workflow for a non-archived repo:
-      1. Add .metadata
+      - If .metadata exists (validation_error): fetch sha → overwrite
+      - If .metadata missing:                   create fresh
     """
     result = {
         "repo": repo_name,
@@ -349,9 +363,15 @@ def process_active_repo(api, repo_name, dry_run):
         return result
 
     print(f"    default branch: {branch}")
-    print(f"    Adding .metadata...")
 
-    meta_result = add_metadata(api, repo_name, branch, dry_run)
+    # Check if .metadata already exists and get its sha for overwrite
+    sha = get_metadata_sha(api, repo_name, branch)
+    if sha:
+        print(f"    .metadata exists (sha: {sha[:7]}...) — will overwrite")
+    else:
+        print(f"    .metadata missing — will create")
+
+    meta_result = add_metadata(api, repo_name, branch, dry_run, sha=sha)
     result["metadata_added"]   = meta_result["success"] and not meta_result["skipped"]
     result["metadata_skipped"] = meta_result["skipped"]
     if not meta_result["success"]:
