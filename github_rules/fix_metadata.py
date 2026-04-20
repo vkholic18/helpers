@@ -313,9 +313,14 @@ def process_archived_repo(api, repo_name, dry_run):
         return result
     print(f"    Step 1: {'(dry-run) unarchive OK' if dry_run else 'unarchived OK'}")
 
-    # Step 2: Add .metadata
+    # Step 2: Add .metadata — check sha first so we overwrite if it exists
     print(f"    Step 2: adding .metadata...")
-    meta_result = add_metadata(api, repo_name, branch, dry_run)
+    sha = get_metadata_sha(api, repo_name, branch)
+    if sha:
+        print(f"    .metadata exists (sha: {sha[:7]}...) — will overwrite")
+    else:
+        print(f"    .metadata not found — will create")
+    meta_result = add_metadata(api, repo_name, branch, dry_run, sha=sha)
     result["metadata_added"]   = meta_result["success"] and not meta_result["skipped"]
     result["metadata_skipped"] = meta_result["skipped"]
     if not meta_result["success"]:
