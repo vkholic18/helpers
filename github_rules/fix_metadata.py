@@ -245,6 +245,27 @@ def add_metadata(api, repo_name, branch, dry_run, sha=None):
         verb = "updated" if sha else "created"
         return {"success": True, "skipped": False, "reason": f".metadata {verb} successfully"}
 
+    if response.status_code in (409, 422) and sha is None:
+        # File already exists on GitHub despite sha check returning None.
+        # Fetch the sha now and retry once with it.
+        print(f"    WARNING: 422 on create — fetching sha and retrying overwrite...")
+        retry_sha = get_metadata_sha(api, repo_name, branch)
+        if retry_sha:
+            payload["sha"] = retry_sha
+            payload["message"] = "Update .metadata file for compliance"
+            retry_response = api.put(
+                f"/repos/{GITHUB_ORG}/{repo_name}/contents/.metadata", payload
+            )
+            time.sleep(SLEEP_INTERVAL)
+            if retry_response.status_code in (200, 201):
+                return {"success": True, "skipped": False, "reason": ".metadata updated successfully (retry with sha)"}
+            try:
+                msg = retry_response.json().get("message", retry_response.text)
+            except Exception:
+                msg = retry_response.text
+            return {"success": False, "skipped": False, "reason": f"Retry failed HTTP {retry_response.status_code}: {msg}"}
+        return {"success": False, "skipped": False, "reason": "422 on create and could not fetch sha for retry"}
+
     if response.status_code in (409, 422):
         return {"success": True, "skipped": True, "reason": ".metadata already exists — skipped (use sha to overwrite)"}
 
